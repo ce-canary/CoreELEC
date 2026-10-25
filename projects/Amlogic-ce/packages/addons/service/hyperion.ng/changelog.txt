@@ -3,6 +3,7 @@
 - Drop platform script
 - Feed the Kodi picture, video and menus, to Hyperion by itself over hyperiond's flatbuffer server, on by default (screen capture used to be opt-in)
 - Build without the DRM and framebuffer screen grabbers
+- Add an option to keep feeding Hyperion while a screensaver runs
 122
 - Add platform script
 121
