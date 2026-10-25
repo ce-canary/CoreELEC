@@ -49,6 +49,7 @@ class Feeder(xbmc.Monitor):
         self.player = xbmc.Player()
         self.screensaver = xbmc.getCondVisibility('System.ScreenSaverActive')
         self.feed = xbmcaddon.Addon().getSettingInt('KODI_FEED')
+        self.feed_screensaver = xbmcaddon.Addon().getSettingBool('KODI_SCREENSAVER')
         self.capture = None
         self.builder = flatbuffers.Builder(CAPTURE_WIDTH * CAPTURE_HEIGHT * 4)
         self.sock = None
@@ -61,6 +62,7 @@ class Feeder(xbmc.Monitor):
 
     def onSettingsChanged(self):
         self.feed = xbmcaddon.Addon().getSettingInt('KODI_FEED')
+        self.feed_screensaver = xbmcaddon.Addon().getSettingBool('KODI_SCREENSAVER')
 
     def onScreensaverActivated(self):
         self.screensaver = True
@@ -69,8 +71,11 @@ class Feeder(xbmc.Monitor):
         self.screensaver = False
 
     def feeding(self):
-        if self.feed == FEED_OFF or self.screensaver:
+        if self.feed == FEED_OFF:
             return False
+        if self.screensaver:
+            # a screensaver over a video counts as a menu
+            return self.feed == FEED_ALL and self.feed_screensaver
         if self.feed == FEED_PLAYBACK:
             return self.player.isPlayingVideo()
         return True
