@@ -1,0 +1,19 @@
+#!/bin/sh
+
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026-present Team CoreELEC (https://coreelec.org)
+
+. /etc/profile
+
+ADDON_HOME="/storage/.kodi/userdata/addon_data/service.hyperion.canary"
+STOCK_DB="/storage/.kodi/userdata/addon_data/service.hyperion.ng/db"
+
+mkdir -p "${ADDON_HOME}"
+
+# the unit is ordered after stock's stop, so stock is not writing its database here
+if [ ! -d "${ADDON_HOME}/db" -a -d "${STOCK_DB}" ]; then
+  rm -rf "${ADDON_HOME}/db.tmp"
+  cp -a "${STOCK_DB}" "${ADDON_HOME}/db.tmp" && mv "${ADDON_HOME}/db.tmp" "${ADDON_HOME}/db"
+fi
+
+exec /usr/share/kodi/addons/service.hyperion.canary/bin/hyperiond --userdata "${ADDON_HOME}"

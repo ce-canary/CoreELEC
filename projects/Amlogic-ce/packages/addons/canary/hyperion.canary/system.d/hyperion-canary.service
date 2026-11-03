@@ -1,0 +1,12 @@
+[Unit]
+Description=Hyperion.NG canary service
+After=graphical.target service.hyperion.ng.service
+Conflicts=service.hyperion.ng.service
+
+[Service]
+Type=simple
+ExecStart=/bin/sh /usr/share/kodi/addons/service.hyperion.canary/bin/hyperiond.start
+TimeoutStopSec=2
+Restart=always
+RestartSec=10
+StartLimitInterval=0
