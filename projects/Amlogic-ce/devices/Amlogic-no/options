@@ -139,6 +139,7 @@
   # Space separated list is supported,
   # e.g. ADDITIONAL_PACKAGES="PACKAGE1 PACKAGE2"
   # ADDITIONAL_PACKAGES+=""
+    ADDITIONAL_PACKAGES+=" canary-bdj"
 
   # add OOTB support for IR remote
   # IR_REMOTE_KEYMAPS+=""
