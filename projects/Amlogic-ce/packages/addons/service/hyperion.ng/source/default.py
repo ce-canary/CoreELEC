@@ -56,7 +56,6 @@ class Feeder(xbmc.Monitor):
         self.screensaver = xbmc.getCondVisibility('System.ScreenSaverActive')
         self.feed = xbmcaddon.Addon().getSettingInt('KODI_FEED')
         self.feed_screensaver = xbmcaddon.Addon().getSettingBool('KODI_SCREENSAVER')
-        self.video_only = False
         self.retry_at = 0
         self.empty = 0
         self.failed = 0
@@ -85,30 +84,19 @@ class Feeder(xbmc.Monitor):
         if self.feed == FEED_OFF:
             return None
         if self.screensaver:
-            # a screensaver covers the video, so only the composite shows it
+            # a screensaver over a video counts as a menu
             if self.feed != FEED_ALL or not self.feed_screensaver:
                 return None
         elif self.player.isPlayingVideo():
             return FEED_VIDEO
-        if self.feed == FEED_ALL and not self.video_only and time.monotonic() >= self.retry_at:
+        if self.feed == FEED_ALL and time.monotonic() >= self.retry_at:
             return FEED_ALL
         return None
 
     def grab(self, target):
         if self.capture is None:
             self.capture = xbmc.RenderCapture()
-        if target == FEED_VIDEO:
-            aspect = self.capture.getAspectRatio()
-            height = round(CAPTURE_WIDTH / aspect) if aspect > 0 else CAPTURE_HEIGHT
-            self.capture.capture(CAPTURE_WIDTH, height)
-        else:
-            try:
-                self.capture.capture(CAPTURE_WIDTH, CAPTURE_HEIGHT, composite=True)
-            except TypeError:
-                log('Kodi has no GUI capture, feeding video only')
-                self.video_only = True
-                self.capture = None
-                return None
+        self.capture.capture(CAPTURE_WIDTH, CAPTURE_HEIGHT, composite=True)
         requested_at = time.monotonic()
         image = self.capture.getImage(FRAME_TIMEOUT_MS)
         failed = (time.monotonic() - requested_at) * 1000 < FAILED_REQUEST_MS
