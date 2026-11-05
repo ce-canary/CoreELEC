@@ -21,11 +21,11 @@ msgid "Off"
 msgstr ""
 
 msgctxt "#30003"
-msgid "Video"
+msgid "Playback only"
 msgstr ""
 
 msgctxt "#30004"
-msgid "Video and menus"
+msgid "Playback and menus"
 msgstr ""
 
 msgctxt "#30005"
