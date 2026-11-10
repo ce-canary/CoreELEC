@@ -1,0 +1,231 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 10 Nov 2026 00:43:41 -0600
+Subject: [PATCH 01/10] [decrypters] Guard the sample pools against concurrent
+ readers
+
+All stream readers of a DRM session share its sample pools and the
+Widevine decrypt buffers. A stream opened during playback adds a pool on
+the player thread while another stream's reader decrypts on the thread
+pool, so the pool could be reallocated under that reader.
+---
+ .../ClearKeyCencSingleSampleDecrypter.cpp     |  8 +++++++
+ .../ClearKeyCencSingleSampleDecrypter.h       |  3 +++
+ .../widevine/WVCencSingleSampleDecrypter.cpp  | 23 ++++++++++++++++---
+ .../widevine/WVCencSingleSampleDecrypter.h    |  2 ++
+ .../WVCencSingleSampleDecrypter.cpp           |  9 ++++++++
+ .../WVCencSingleSampleDecrypter.h             |  3 +++
+ 6 files changed, 45 insertions(+), 3 deletions(-)
+
+diff --git a/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.cpp b/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.cpp
+index 8deb5d0d94..474a4e8720 100644
+--- a/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.cpp
++++ b/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.cpp
+@@ -110,6 +110,8 @@ bool CClearKeyCencSingleSampleDecrypter::HasKeyId(const std::vector<uint8_t>& ke
+ 
+ AP4_UI32 CClearKeyCencSingleSampleDecrypter::AddPool()
+ {
++  std::lock_guard<std::mutex> lock(m_poolMutex);
++
+   const AP4_UI32 poolId = static_cast<AP4_UI32>(m_pool.size());
+ 
+   m_pool.emplace(poolId, PINFO());
+@@ -119,6 +121,8 @@ AP4_UI32 CClearKeyCencSingleSampleDecrypter::AddPool()
+ 
+ void CClearKeyCencSingleSampleDecrypter::RemovePool(AP4_UI32 poolId)
+ {
++  std::lock_guard<std::mutex> lock(m_poolMutex);
++
+   m_pool.erase(poolId);
+ }
+ 
+@@ -130,6 +134,8 @@ AP4_Result CClearKeyCencSingleSampleDecrypter::SetFragmentInfo(
+     DRM::Capabilities flags,
+     CryptoInfo cryptoInfo)
+ {
++  std::lock_guard<std::mutex> lock(m_poolMutex);
++
+   if (!STRING::KeyExists(m_pool, poolId))
+   {
+     LOG::LogF(LOGERROR, "Cannot set fragment info, the pool id %u dont exist", poolId);
+@@ -170,6 +176,8 @@ AP4_Result CClearKeyCencSingleSampleDecrypter::DecryptSampleData(
+     const AP4_UI32* bytesOfEncryptedData,
+     DRM::DRMMediaType streamType)
+ {
++  std::lock_guard<std::mutex> lock(m_poolMutex);
++
+   if (m_pool.empty())
+   {
+     LOG::LogF(LOGERROR, "Cannot decrypt data, the pool is empty");
+diff --git a/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.h b/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.h
+index efe04b4943..f58d2755f1 100644
+--- a/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.h
++++ b/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.h
+@@ -12,6 +12,7 @@
+ 
+ #include <cstdint>
+ #include <map>
++#include <mutex>
+ #include <vector>
+ 
+ class CClearKeyDecrypter;
+@@ -79,6 +80,8 @@ private:
+ 
+   // \brif Decrypter pool
+   std::map<AP4_UI32, PINFO> m_pool; // ID - Pool info
++  // the stream readers run on several threads
++  std::mutex m_poolMutex;
+ 
+   DRM::Config m_config;
+   std::vector<uint8_t> m_defaultKeyId;
+diff --git a/src/decrypters/widevine/WVCencSingleSampleDecrypter.cpp b/src/decrypters/widevine/WVCencSingleSampleDecrypter.cpp
+index 80c1c0db7d..a057115c9a 100644
+--- a/src/decrypters/widevine/WVCencSingleSampleDecrypter.cpp
++++ b/src/decrypters/widevine/WVCencSingleSampleDecrypter.cpp
+@@ -457,6 +457,8 @@ AP4_Result CWVCencSingleSampleDecrypter::SetFragmentInfo(AP4_UI32 poolId,
+                                                          DRM::Capabilities caps,
+                                                          CryptoInfo cryptoInfo)
+ {
++  std::lock_guard<std::mutex> lock(m_poolMutex);
++
+   if (poolId >= m_fragmentPool.size())
+     return AP4_ERROR_OUT_OF_RANGE;
+ 
+@@ -471,6 +473,8 @@ AP4_Result CWVCencSingleSampleDecrypter::SetFragmentInfo(AP4_UI32 poolId,
+ 
+ AP4_UI32 CWVCencSingleSampleDecrypter::AddPool()
+ {
++  std::lock_guard<std::mutex> lock(m_poolMutex);
++
+   for (size_t i(0); i < m_fragmentPool.size(); ++i)
+     if (m_fragmentPool[i].m_nalLengthSize == 99)
+     {
+@@ -485,6 +489,8 @@ AP4_UI32 CWVCencSingleSampleDecrypter::AddPool()
+ 
+ void CWVCencSingleSampleDecrypter::RemovePool(AP4_UI32 poolId)
+ {
++  std::lock_guard<std::mutex> lock(m_poolMutex);
++
+   m_fragmentPool[poolId].m_nalLengthSize = 99;
+   m_fragmentPool[poolId].m_key.clear();
+ }
+@@ -575,6 +581,20 @@ AP4_Result CWVCencSingleSampleDecrypter::DecryptSampleData(AP4_UI32 poolId,
+     return AP4_SUCCESS;
+   }
+ 
++  // a renewal is a license request, keep it out of the pool lock. The video decoder renews
++  // for a secure path stream
++  bool isRenewalHere{true};
++#ifndef TARGET_WEBOS
++  {
++    std::lock_guard<std::mutex> lock(m_poolMutex);
++    isRenewalHere = !m_fragmentPool[poolId].capabilities.HasFlag(Capabilities::SECURE_PATH);
++  }
++#endif
++  if (isRenewalHere)
++    CheckLicenseRenewal();
++
++  std::lock_guard<std::mutex> lock(m_poolMutex);
++
+   FINFO& fragInfo(m_fragmentPool[poolId]);
+ 
+   if (fragInfo.capabilities.HasFlag(Capabilities::SECURE_PATH)) //we can not decrypt only
+@@ -659,8 +679,6 @@ AP4_Result CWVCencSingleSampleDecrypter::DecryptSampleData(AP4_UI32 poolId,
+     CdmDecryptedBlock cdmOut;
+     cdmOut.SetDecryptedBuffer(&buf);
+ 
+-    CheckLicenseRenewal();
+-
+     cdm::Status ret = m_cdmAdapter->GetCDM()->Decrypt(cdmIn, &cdmOut, ToCdmStreamType(streamType));
+     if (ret != cdm::kSuccess)
+     {
+@@ -771,7 +789,6 @@ AP4_Result CWVCencSingleSampleDecrypter::DecryptSampleData(AP4_UI32 poolId,
+     CdmDecryptedBlock cdmOut;
+     cdmOut.SetDecryptedBuffer(&buf);
+ 
+-    CheckLicenseRenewal();
+     ret = m_cdmAdapter->GetCDM()->Decrypt(cdmIn, &cdmOut, ToCdmStreamType(streamType));
+ 
+     if (ret == cdm::Status::kSuccess)
+diff --git a/src/decrypters/widevine/WVCencSingleSampleDecrypter.h b/src/decrypters/widevine/WVCencSingleSampleDecrypter.h
+index 4b0004b03b..945693c2f0 100644
+--- a/src/decrypters/widevine/WVCencSingleSampleDecrypter.h
++++ b/src/decrypters/widevine/WVCencSingleSampleDecrypter.h
+@@ -106,6 +106,8 @@ private:
+   int m_hdcpLimit{0};
+   int m_resolutionLimit{0};
+ 
++  // guards the pool and the decrypt buffers, the stream readers run on several threads
++  std::mutex m_poolMutex;
+   AP4_DataBuffer m_decryptIn;
+   AP4_DataBuffer m_decryptOut;
+ 
+diff --git a/src/decrypters/widevineandroid/WVCencSingleSampleDecrypter.cpp b/src/decrypters/widevineandroid/WVCencSingleSampleDecrypter.cpp
+index c3ae7f6528..1877f04132 100644
+--- a/src/decrypters/widevineandroid/WVCencSingleSampleDecrypter.cpp
++++ b/src/decrypters/widevineandroid/WVCencSingleSampleDecrypter.cpp
+@@ -528,6 +528,8 @@ AP4_Result CWVCencSingleSampleDecrypterA::SetFragmentInfo(AP4_UI32 poolId,
+                                                           DRM::Capabilities caps,
+                                                           CryptoInfo cryptoInfo)
+ {
++  std::unique_lock<std::mutex> lock(m_poolMutex);
++
+   if (poolId >= m_fragmentPool.size())
+     return AP4_ERROR_OUT_OF_RANGE;
+ 
+@@ -535,6 +537,7 @@ AP4_Result CWVCencSingleSampleDecrypterA::SetFragmentInfo(AP4_UI32 poolId,
+   m_fragmentPool[poolId].m_nalLengthSize = nalLengthSize;
+   m_fragmentPool[poolId].m_annexbSpsPps = annexbSpsPps;
+   m_fragmentPool[poolId].capabilities = caps;
++  lock.unlock();
+ 
+   if (m_isKeyUpdateRequested)
+     KeyUpdateRequest(false, false);
+@@ -544,6 +547,8 @@ AP4_Result CWVCencSingleSampleDecrypterA::SetFragmentInfo(AP4_UI32 poolId,
+ 
+ AP4_UI32 CWVCencSingleSampleDecrypterA::AddPool()
+ {
++  std::lock_guard<std::mutex> lock(m_poolMutex);
++
+   for (size_t i(0); i < m_fragmentPool.size(); ++i)
+     if (m_fragmentPool[i].m_nalLengthSize == 99)
+     {
+@@ -558,6 +563,8 @@ AP4_UI32 CWVCencSingleSampleDecrypterA::AddPool()
+ 
+ void CWVCencSingleSampleDecrypterA::RemovePool(AP4_UI32 poolId)
+ {
++  std::lock_guard<std::mutex> lock(m_poolMutex);
++
+   m_fragmentPool[poolId].m_nalLengthSize = 99;
+   m_fragmentPool[poolId].m_key.clear();
+ }
+@@ -574,6 +581,8 @@ AP4_Result CWVCencSingleSampleDecrypterA::DecryptSampleData(AP4_UI32 poolId,
+   if (!m_cdmAdapter->GetCDM())
+     return AP4_ERROR_INVALID_STATE;
+ 
++  std::lock_guard<std::mutex> lock(m_poolMutex);
++
+   FINFO& fragInfo(m_fragmentPool[poolId]);
+ 
+   if (fragInfo.m_nalLengthSize > 4)
+diff --git a/src/decrypters/widevineandroid/WVCencSingleSampleDecrypter.h b/src/decrypters/widevineandroid/WVCencSingleSampleDecrypter.h
+index a5bdc9fdb6..d5d681f503 100644
+--- a/src/decrypters/widevineandroid/WVCencSingleSampleDecrypter.h
++++ b/src/decrypters/widevineandroid/WVCencSingleSampleDecrypter.h
+@@ -13,6 +13,7 @@
+ #include "decrypters/IDecrypter.h"
+ 
+ #include <map>
++#include <mutex>
+ #include <string_view>
+ 
+ class CJNIMediaDrm;
+@@ -117,6 +118,8 @@ private:
+ 
+   std::vector<uint8_t> m_defaultKeyId;
+ 
++  // the stream readers run on several threads
++  std::mutex m_poolMutex;
+   std::vector<FINFO> m_fragmentPool;
+ 
+   uint16_t m_hdcpVersion{DRM::HDCP_V_MAX};
