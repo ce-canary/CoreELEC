@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 10 Nov 2026 00:45:01 -0600
+Subject: [PATCH 08/10] [main] Start a prefetched item's first reads at stream
+ open
+
+A prefetched item read its first samples only on the first DemuxRead
+after the join. That started each stream's reader in turn and waited
+for it, so the audio segment download began after the video one.
+---
+ src/main.cpp                    | 11 +++++++++++
+ src/main.h                      |  1 +
+ src/samplereader/SampleReader.h |  8 ++++++++
+ 3 files changed, 20 insertions(+)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 6b43ba73a6..ef759b5d4e 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -46,6 +46,7 @@ bool CInputStreamAdaptive::Open(const kodi::addon::InputstreamProperty& props)
+   LOG::Log(LOGDEBUG, "Open()");
+ 
+   m_session = std::make_shared<CSession>(props.GetProperties());
++  m_isPrefetchOpen = props.IsPrefetch();
+ 
+   SResult ret = m_session->Initialize(props.GetURL(), m_screenInfo, props.IsPrefetch());
+   if (ret.IsFailed())
+@@ -347,6 +348,16 @@ bool CInputStreamAdaptive::OpenStream(int streamid)
+   // If stream use DRM always update stream info
+   const bool isInfoChanged = stream->GetReader()->GetInformation(stream->m_info) ||
+                              !stream->m_info.GetCryptoSession().GetSessionId().empty();
++
++  // the streams of a prefetch read their first sample while the current item plays. Subtitles
++  // wait, Kodi disables a hidden one right after opening it, and so does a video stream carrying
++  // included streams, until they are linked to its reader
++  const INPUTSTREAM_TYPE streamType{stream->m_info.GetStreamType()};
++  if (m_isPrefetchOpen && !m_isDemuxReadStarted &&
++      (streamType == INPUTSTREAM_TYPE_AUDIO ||
++       (streamType == INPUTSTREAM_TYPE_VIDEO && m_session->GetIncludedStreamMask() == 0)))
++    stream->GetReader()->StartAsync();
++
+   return isInfoChanged;
+ }
+ 
+diff --git a/src/main.h b/src/main.h
+index 0a294f3fb7..4b89d0b4ae 100644
+--- a/src/main.h
++++ b/src/main.h
+@@ -62,6 +62,7 @@ private:
+ 
+   bool m_checkCoreReopen{false}; // Check if Kodi core will reopen all streams
+   bool m_isDemuxReadStarted{false};
++  bool m_isPrefetchOpen{false};
+ };
+ 
+ /*******************************************************/
+diff --git a/src/samplereader/SampleReader.h b/src/samplereader/SampleReader.h
+index b6d80eff15..7eaa646f2a 100644
+--- a/src/samplereader/SampleReader.h
++++ b/src/samplereader/SampleReader.h
+@@ -136,6 +136,14 @@ public:
+         UTILS::THREAD::GlobalThreadPool.Execute(&ISampleReader::ReadSample, this);
+   }
+ 
++  /*!
++   * \brief Start the reader asynchronously, it is waited for as an asynchronous ReadSample
++   */
++  void StartAsync()
++  {
++    m_readSampleAsyncState = UTILS::THREAD::GlobalThreadPool.Execute([this] { return Start(); });
++  }
++
+   /*!
+    * \brief Wait for the asynchronous ReadSample to complete
+    */

@@ -1,0 +1,284 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 9 Nov 2026 22:00:28 -0600
+Subject: [PATCH 06/10] [main] Decline a prefetch open that would show a dialog
+
+Kodi can open the next playlist item while the current one still plays.
+Such an open would show its error dialogs and the ask-quality chooser
+over the playing item.
+---
+ src/Session.cpp                | 24 ++++++++++++++++++++----
+ src/Session.h                  |  8 ++++++--
+ src/common/Chooser.h           |  6 ++++++
+ src/common/ChooserAskQuality.h |  2 ++
+ src/decrypters/DrmEngine.cpp   | 20 ++++++++++++++------
+ src/decrypters/DrmEngine.h     | 17 +++++++++++++++++
+ src/main.cpp                   | 13 ++++++++++---
+ 7 files changed, 75 insertions(+), 15 deletions(-)
+
+diff --git a/src/Session.cpp b/src/Session.cpp
+index 4efd63e11a..a17c0f03e2 100644
+--- a/src/Session.cpp
++++ b/src/Session.cpp
+@@ -116,11 +116,17 @@ void SESSION::CSession::DeleteStreams()
+ +---------------------------------------------------------------------*/
+ 
+ SResult SESSION::CSession::Initialize(std::string manifestUrl,
+-                                     const ADP::RESOURCES::ScreenInfo& screenInfo)
++                                     const ADP::RESOURCES::ScreenInfo& screenInfo,
++                                     bool isPrefetch)
+ {
+   m_reprChooser =
+       CHOOSER::CreateRepresentationChooser(m_kodiProps.GetChooserProps(), screenInfo);
+ 
++  if (isPrefetch && m_reprChooser->IsInteractive())
++    return SResult::Error("The prefetch is not supported with the ask quality stream selection");
++
++  m_drmEngine.SetPrefetch(isPrefetch);
++
+   switch (CSrvBroker::GetSettings().GetMediaType())
+   {
+     case 1:
+@@ -149,6 +155,8 @@ SResult SESSION::CSession::Initialize(std::string manifestUrl,
+     manifestHeaders["challengeB64"] = STRING::URLEncode(session.challenge);
+     manifestHeaders["sessionId"] = session.id;
+   }
++  if (m_drmEngine.GetPrefetchError())
++    return SResult::Error(*m_drmEngine.GetPrefetchError());
+ 
+   URL::RemovePipePart(manifestUrl); // No pipe char uses, must be used Kodi properties only
+ 
+@@ -189,8 +197,15 @@ SResult SESSION::CSession::Initialize(std::string manifestUrl,
+   m_adaptiveTree->PostOpen();
+   m_reprChooser->PostInit();
+ 
+-  InitializePeriod();
++  InitializePeriod(isPrefetch);
++
++  if (m_drmEngine.GetPrefetchError())
++    return SResult::Error(*m_drmEngine.GetPrefetchError());
++  if (isPrefetch && m_streams.empty())
++    return SResult::Error("No stream can be played");
+ 
++  // streams open once the item plays, so their errors show
++  m_drmEngine.SetPrefetch(false);
+   return SResultCode::OK;
+ }
+ 
+@@ -295,7 +310,7 @@ bool SESSION::CSession::CheckPlayableStreams(PLAYLIST::CPeriod* period)
+   return true;
+ }
+ 
+-void SESSION::CSession::InitializePeriod()
++void SESSION::CSession::InitializePeriod(bool isPrefetch /* = false */)
+ {
+   if (m_adaptiveTree->IsChangingPeriod())
+   {
+@@ -409,7 +424,8 @@ void SESSION::CSession::InitializePeriod()
+   {
+     LOG::LogF(LOGERROR,
+               "No stream can be played, common causes: resolution limits or HDCP problem");
+-    GUI::ErrorDialog(GUI::GetLocalizedString(30309));
++    if (!isPrefetch)
++      GUI::ErrorDialog(GUI::GetLocalizedString(30309));
+   }
+ 
+   // Ensure that video streams are always placed before all other types
+diff --git a/src/Session.h b/src/Session.h
+index 26d68edda6..f59933d93e 100644
+--- a/src/Session.h
++++ b/src/Session.h
+@@ -40,16 +40,20 @@ public:
+   /*! \brief Initialize the session
+    *  \param manifestUrl The manifest URL
+    *  \param screenInfo The screen info
++   *  \param isPrefetch Fail instead of showing any dialog
+    *  \return True if has success, false otherwise
+    */
+-  SResult Initialize(std::string manifestUrl, const ADP::RESOURCES::ScreenInfo& screenInfo);
++  SResult Initialize(std::string manifestUrl,
++                     const ADP::RESOURCES::ScreenInfo& screenInfo,
++                     bool isPrefetch);
+ 
+   bool CheckPlayableStreams(PLAYLIST::CPeriod* period);
+ 
+   /*!
+    * \brief Initialize adaptive tree period
++   * \param isPrefetch Do not show the error dialog when no stream can be played
+    */
+-  void InitializePeriod();
++  void InitializePeriod(bool isPrefetch = false);
+ 
+   /*! \brief Get the sample reader of the next sample stream. This also set flags
+    *         if the stream has changed, use CheckChange method to check it.
+diff --git a/src/common/Chooser.h b/src/common/Chooser.h
+index a6252aa701..0411022105 100644
+--- a/src/common/Chooser.h
++++ b/src/common/Chooser.h
+@@ -83,6 +83,12 @@ public:
+    */
+   virtual StreamSelection GetStreamSelectionMode() { return StreamSelection::AUTO; }
+ 
++  /*!
++   * \brief Specifies if the chooser can show a dialog to ask the user for the stream quality.
++   * \return True if it can show a dialog, otherwise false
++   */
++  virtual bool IsInteractive() const { return false; }
++
+   /*!
+    * \brief Called at each DRM initialization to set if the secure session is currently being used.
+    * \param isSecureSession Set true if a secure session is in use
+diff --git a/src/common/ChooserAskQuality.h b/src/common/ChooserAskQuality.h
+index 3968090077..2908be03b6 100644
+--- a/src/common/ChooserAskQuality.h
++++ b/src/common/ChooserAskQuality.h
+@@ -25,6 +25,8 @@ public:
+ 
+   void PostInit() override;
+ 
++  bool IsInteractive() const override { return true; }
++
+   PLAYLIST::CAdaptationSet* GetPreferredVideoAdpSet(
+       PLAYLIST::CPeriod* period, PLAYLIST::CAdaptationSet* adpSetPreferred) override;
+ 
+diff --git a/src/decrypters/DrmEngine.cpp b/src/decrypters/DrmEngine.cpp
+index 3a8492c731..783ea67ce5 100644
+--- a/src/decrypters/DrmEngine.cpp
++++ b/src/decrypters/DrmEngine.cpp
+@@ -336,7 +336,7 @@ bool DRM::CDRMEngine::PreInitializeDRM(DRMSession& session)
+   {
+     m_status = EngineStatus::DRM_ERROR;
+     LOG::LogF(LOGERROR, "Cannot get the DRM instance for keysystem %s", m_keySystem.c_str());
+-    GUI::ErrorDialog(GUI::GetLocalizedString(30303));
++    ErrorDialog(GUI::GetLocalizedString(30303));
+     return false;
+   }
+ 
+@@ -361,7 +361,7 @@ bool DRM::CDRMEngine::PreInitializeDRM(DRMSession& session)
+   {
+     LOG::LogF(LOGERROR, "Failed to create the DRM session");
+     m_status = EngineStatus::DRM_ERROR;
+-    GUI::ErrorDialog(ret.Message());
++    ErrorDialog(ret.Message());
+     return false;
+   }
+ 
+@@ -427,7 +427,7 @@ const std::shared_ptr<DRMSession> DRM::CDRMEngine::InitializeSession(
+   if (!SelectDRM(drmInfos))
+   {
+     LOG::LogF(LOGERROR, "The stream requires an unsupported DRM.");
+-    GUI::ErrorDialog("The stream requires an unsupported DRM.");
++    ErrorDialog("The stream requires an unsupported DRM.");
+     m_status = EngineStatus::DRM_ERROR;
+     return nullptr;
+   }
+@@ -552,7 +552,7 @@ const std::shared_ptr<DRMSession> DRM::CDRMEngine::InitializeSession(
+       {
+         m_status = EngineStatus::DRM_ERROR;
+         LOG::LogF(LOGERROR, "Cannot get the DRM instance for keysystem %s", m_keySystem.c_str());
+-        GUI::ErrorDialog(GUI::GetLocalizedString(30303));
++        ErrorDialog(GUI::GetLocalizedString(30303));
+         return nullptr;
+       }
+ 
+@@ -574,7 +574,7 @@ const std::shared_ptr<DRMSession> DRM::CDRMEngine::InitializeSession(
+         m_status = EngineStatus::DECRYPTER_ERROR;
+         LOG::Log(LOGERROR, "Failed to initialize the %s DRM decrypter",
+                  newSes.drm->GetName().c_str());
+-        GUI::ErrorDialog(GUI::GetLocalizedString(30303));
++        ErrorDialog(GUI::GetLocalizedString(30303));
+         return nullptr;
+       }
+ 
+@@ -585,7 +585,7 @@ const std::shared_ptr<DRMSession> DRM::CDRMEngine::InitializeSession(
+       {
+         LOG::LogF(LOGERROR, "Failed to create the DRM session");
+         m_status = EngineStatus::DRM_ERROR;
+-        GUI::ErrorDialog(ret.Message());
++        ErrorDialog(ret.Message());
+         return nullptr;
+       }
+ 
+@@ -946,6 +946,14 @@ std::shared_ptr<DRM::IDecrypter> DRM::CDRMEngine::GetDrmInstance(std::string_vie
+   return it != m_drms.cend() ? it->drm : nullptr;
+ }
+ 
++void DRM::CDRMEngine::ErrorDialog(const std::string& msg)
++{
++  if (!m_isPrefetch)
++    GUI::ErrorDialog(msg);
++  else if (!m_prefetchError)
++    m_prefetchError = msg;
++}
++
+ void DRM::CDRMEngine::Dispose()
+ {
+   LOG::Log(LOGDEBUG, "Dispose DRM Engine");
+diff --git a/src/decrypters/DrmEngine.h b/src/decrypters/DrmEngine.h
+index a68f27c734..7c6847d5c4 100644
+--- a/src/decrypters/DrmEngine.h
++++ b/src/decrypters/DrmEngine.h
+@@ -85,6 +85,18 @@ public:
+    */
+   void Dispose();
+ 
++  /*!
++   * \brief Set whether the engine works for a prefetch open, which must not show a dialog.
++   * \param isPrefetch True for a prefetch open
++   */
++  void SetPrefetch(bool isPrefetch) { m_isPrefetch = isPrefetch; }
++
++  /*!
++   * \brief Get the error that would have shown a dialog during a prefetch open.
++   * \return The error message, otherwise no value
++   */
++  const std::optional<std::string>& GetPrefetchError() const { return m_prefetchError; }
++
+ private:
+   /*!
+    * \brief Initialize the DRM engine.
+@@ -112,6 +124,9 @@ private:
+   // \brief Get a DRM instance for the specified key system, it will return nullptr if not found
+   std::shared_ptr<DRM::IDecrypter> GetDrmInstance(std::string_view ks) const;
+ 
++  // \brief Show an error dialog, or keep the error to decline a prefetch open
++  void ErrorDialog(const std::string& msg);
++
+   const ADP::KODI_PROPS::CCompKodiProps& m_kodiProps;
+   ADP::RESOURCES::CCompResources& m_resources;
+   std::string m_keySystem; // Choosen key system
+@@ -120,6 +135,8 @@ private:
+ 
+   EngineStatus m_status{EngineStatus::NONE};
+   bool m_isPreinitialized{false};
++  bool m_isPrefetch{false};
++  std::optional<std::string> m_prefetchError;
+ };
+ 
+ } // namespace DRM
+diff --git a/src/main.cpp b/src/main.cpp
+index 9c37b04663..9dae755895 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -47,11 +47,18 @@ bool CInputStreamAdaptive::Open(const kodi::addon::InputstreamProperty& props)
+ 
+   m_session = std::make_shared<CSession>(props.GetProperties());
+ 
+-  SResult ret = m_session->Initialize(props.GetURL(), m_screenInfo);
++  SResult ret = m_session->Initialize(props.GetURL(), m_screenInfo, props.IsPrefetch());
+   if (ret.IsFailed())
+   {
+-    LOG::Log(LOGERROR, ret.Message().c_str());
+-    UTILS::GUI::ErrorDialog(ret.Message());
++    if (props.IsPrefetch())
++    {
++      LOG::Log(LOGINFO, "Prefetch declined: %s", ret.Message().c_str());
++    }
++    else
++    {
++      LOG::Log(LOGERROR, ret.Message().c_str());
++      UTILS::GUI::ErrorDialog(ret.Message());
++    }
+     m_session = nullptr;
+     return false;
+   }
