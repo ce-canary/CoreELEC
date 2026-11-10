@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 10 Nov 2026 00:45:11 -0600
+Subject: [PATCH 07/10] [main] Keep the streams Kodi opens again before the
+ first DemuxRead
+
+An OpenStream on an enabled stream was taken as Kodi's reopen of all
+streams, which skips every later subtitle open until the next DemuxRead.
+A prefetched item gets its pre-opened streams opened again at the join,
+so a subtitle stream the prefetch did not open was never opened.
+---
+ src/main.cpp | 9 +++++++++
+ src/main.h   | 1 +
+ 2 files changed, 10 insertions(+)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 9dae755895..6b43ba73a6 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -221,6 +221,14 @@ bool CInputStreamAdaptive::OpenStream(int streamid)
+ 
+   const bool isStreamChanged{stream->m_adStream.StreamChanged()};
+ 
++  // Kodi opens a stream its prefetch already opened again before the first DemuxRead,
++  // this is no reopen round and the streams not yet opened must still open
++  if (!m_isDemuxReadStarted && stream->IsEnabled() && !isStreamChanged)
++  {
++    LOG::Log(LOGDEBUG, "OpenStream(%d): The stream has already been opened", streamid);
++    return false;
++  }
++
+   if (stream->IsEnabled())
+   {
+     // Stream quality changed (by "adaptive" streaming, not OSD)
+@@ -352,6 +360,7 @@ DEMUX_PACKET* CInputStreamAdaptive::DemuxRead(void)
+   // On Kodi core CDVDDemuxClient::ParsePacket occurs after the DemuxRead callback
+   // since it can cause to reopen all streams, reset the check just before
+   m_checkCoreReopen = false;
++  m_isDemuxReadStarted = true;
+ 
+   ISampleReader* sr{nullptr};
+ 
+diff --git a/src/main.h b/src/main.h
+index 4822274649..0a294f3fb7 100644
+--- a/src/main.h
++++ b/src/main.h
+@@ -61,6 +61,7 @@ private:
+   ADP::RESOURCES::ScreenInfo m_screenInfo;
+ 
+   bool m_checkCoreReopen{false}; // Check if Kodi core will reopen all streams
++  bool m_isDemuxReadStarted{false};
+ };
+ 
+ /*******************************************************/

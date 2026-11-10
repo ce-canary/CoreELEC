@@ -1,0 +1,121 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 9 Nov 2026 21:58:11 -0600
+Subject: [PATCH 05/10] [decrypters] Remove the remaining state shared by
+ instances
+
+The stream debug id and the ClearKey session counter were incremented
+from several threads without synchronization. The Android JNI env getter
+read a pointer to the newest Widevine decrypter, which dangled once that
+decrypter was deleted before an older one.
+---
+ src/common/AdaptiveStream.cpp                    |  2 +-
+ src/common/AdaptiveStream.h                      |  2 +-
+ .../ClearKeyCencSingleSampleDecrypter.cpp        |  2 +-
+ .../clearkey/ClearKeyCencSingleSampleDecrypter.h |  3 ++-
+ .../widevine/WVCencSingleSampleDecrypter.cpp     |  2 +-
+ src/decrypters/widevineandroid/WVDecrypter.cpp   | 16 ++++------------
+ 6 files changed, 10 insertions(+), 17 deletions(-)
+
+diff --git a/src/common/AdaptiveStream.cpp b/src/common/AdaptiveStream.cpp
+index 98d1462a00..dc01461a64 100644
+--- a/src/common/AdaptiveStream.cpp
++++ b/src/common/AdaptiveStream.cpp
+@@ -34,7 +34,7 @@ using namespace ADP;
+ using namespace PLAYLIST;
+ using namespace UTILS;
+ 
+-uint32_t adaptive::AdaptiveStream::globalClsId = 0;
++std::atomic<uint32_t> adaptive::AdaptiveStream::globalClsId{0};
+ 
+ adaptive::AdaptiveStream::AdaptiveStream(AdaptiveTree* tree,
+                                          PLAYLIST::CAdaptationSet* adp,
+diff --git a/src/common/AdaptiveStream.h b/src/common/AdaptiveStream.h
+index 3cbd04e237..66a372cb88 100644
+--- a/src/common/AdaptiveStream.h
++++ b/src/common/AdaptiveStream.h
+@@ -296,6 +296,6 @@ enum class EVENT_TYPE
+ 
+     // Class ID for debug log purpose, allow the LOG prints of each AdaptiveStream to be distinguished
+     uint32_t clsId;
+-    static uint32_t globalClsId; // Incremental value for each new class created
++    static std::atomic<uint32_t> globalClsId; // Incremental value for each new class created
+   };
+ };
+diff --git a/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.cpp b/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.cpp
+index b294deac00..141324298a 100644
+--- a/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.cpp
++++ b/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.cpp
+@@ -27,7 +27,7 @@
+ using njson = nlohmann::json;
+ using namespace UTILS;
+ 
+-uint32_t CClearKeyCencSingleSampleDecrypter::g_sessionIdCount = 1;
++std::atomic<uint32_t> CClearKeyCencSingleSampleDecrypter::g_sessionIdCount{1};
+ 
+ CClearKeyCencSingleSampleDecrypter::CClearKeyCencSingleSampleDecrypter(
+     const std::vector<uint8_t>& defaultKeyId,
+diff --git a/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.h b/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.h
+index 860dd1981b..7f7ab1b9c2 100644
+--- a/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.h
++++ b/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.h
+@@ -10,6 +10,7 @@
+ #include "decrypters/IDecrypter.h"
+ #include "utils/CryptoUtils.h"
+ 
++#include <atomic>
+ #include <cstdint>
+ #include <map>
+ #include <mutex>
+@@ -87,5 +88,5 @@ private:
+   DRM::Config m_config;
+   std::vector<uint8_t> m_defaultKeyId;
+   std::string m_sessionId;
+-  static uint32_t g_sessionIdCount;
++  static std::atomic<uint32_t> g_sessionIdCount;
+ };
+diff --git a/src/decrypters/widevine/WVCencSingleSampleDecrypter.cpp b/src/decrypters/widevine/WVCencSingleSampleDecrypter.cpp
+index a6418bebc5..b18ba25a6a 100644
+--- a/src/decrypters/widevine/WVCencSingleSampleDecrypter.cpp
++++ b/src/decrypters/widevine/WVCencSingleSampleDecrypter.cpp
+@@ -1059,7 +1059,7 @@ VIDEOCODEC_RETVAL CWVCencSingleSampleDecrypter::VideoFrameDataToPicture(
+   }
+   else if ((picture->flags & VIDEOCODEC_PICTURE_FLAG_DRAIN))
+   {
+-    static DEMUX_PACKET drainSample{};
++    DEMUX_PACKET drainSample{};
+     if (m_isDrained || DecryptAndDecodeVideo(codecInstance, &drainSample) == VC_ERROR)
+     {
+       m_isDrained = true;
+diff --git a/src/decrypters/widevineandroid/WVDecrypter.cpp b/src/decrypters/widevineandroid/WVDecrypter.cpp
+index ff51be3365..ba75b28e3f 100644
+--- a/src/decrypters/widevineandroid/WVDecrypter.cpp
++++ b/src/decrypters/widevineandroid/WVDecrypter.cpp
+@@ -23,17 +23,7 @@
+ using namespace DRM;
+ using namespace UTILS;
+ 
+-namespace
+-{
+-kodi::platform::CInterfaceAndroidSystem* ANDROID_SYSTEM{nullptr};
+-} // unnamed namespace
+-
+-CWVDecrypterA::CWVDecrypterA()
+-{
+-  // CInterfaceAndroidSystem need to be initialized at runtime
+-  // then we have to set it to global variable just now
+-  ANDROID_SYSTEM = &m_androidSystem;
+-};
++CWVDecrypterA::CWVDecrypterA() = default;
+ 
+ CWVDecrypterA::~CWVDecrypterA()
+ {
+@@ -187,5 +177,7 @@ bool CWVDecrypterA::Initialize()
+ // Definition for the xbmc_jnienv method of the jni utils (jutils.hpp)
+ JNIEnv* xbmc_jnienv()
+ {
+-  return static_cast<JNIEnv*>(ANDROID_SYSTEM->GetJNIEnv());
++  // CInterfaceAndroidSystem need to be initialized at runtime, after the add-on creation
++  static kodi::platform::CInterfaceAndroidSystem androidSystem;
++  return static_cast<JNIEnv*>(androidSystem.GetJNIEnv());
+ }

@@ -1,0 +1,239 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 9 Nov 2026 21:56:25 -0600
+Subject: [PATCH 03/10] [SrvBroker] Share settings and thread pool between
+ instances
+
+The settings and the global thread pool were recreated by each new
+instance and destroyed by each Close, so one instance could pull them
+from under another that was still playing.
+---
+ src/SrvBroker.cpp           | 16 ++++++++++++----
+ src/SrvBroker.h             | 12 ++++++++----
+ src/main.cpp                | 11 +++++++----
+ src/main.h                  |  1 +
+ src/test/CMakeLists.txt     |  1 +
+ src/test/TestDASHTree.cpp   |  3 ++-
+ src/test/TestHLSTree.cpp    |  3 ++-
+ src/test/TestSmoothTree.cpp |  3 ++-
+ src/utils/ThreadPool.cpp    |  3 +++
+ 9 files changed, 38 insertions(+), 15 deletions(-)
+
+diff --git a/src/SrvBroker.cpp b/src/SrvBroker.cpp
+index 03ea8063e8..f7ac278246 100644
+--- a/src/SrvBroker.cpp
++++ b/src/SrvBroker.cpp
+@@ -9,18 +9,26 @@
+ #include "SrvBroker.h"
+ 
+ #include "CompSettings.h"
++#include "utils/ThreadPool.h"
+ 
+ using namespace ADP;
+ 
+ CSrvBroker::CSrvBroker() = default;
+ CSrvBroker::~CSrvBroker() = default;
+ 
+-void CSrvBroker::Initialize()
++void CSrvBroker::Acquire()
+ {
+-  m_compSettings = std::make_unique<SETTINGS::CCompSettings>();
++  std::lock_guard<std::mutex> lock(m_mutex);
++  if (m_refCount++ == 0)
++    m_compSettings = std::make_unique<SETTINGS::CCompSettings>();
+ }
+ 
+-void CSrvBroker::Deinitialize()
++void CSrvBroker::Release()
+ {
+-  m_compSettings.reset();
++  std::lock_guard<std::mutex> lock(m_mutex);
++  if (--m_refCount == 0)
++  {
++    UTILS::THREAD::GlobalThreadPool.Reset();
++    m_compSettings.reset();
++  }
+ }
+diff --git a/src/SrvBroker.h b/src/SrvBroker.h
+index bed186e7c1..c6187d6319 100644
+--- a/src/SrvBroker.h
++++ b/src/SrvBroker.h
+@@ -15,6 +15,7 @@
+ #endif
+ 
+ #include <memory>
++#include <mutex>
+ 
+ // forward
+ namespace ADP::SETTINGS
+@@ -32,9 +33,9 @@ public:
+   void operator=(const CSrvBroker&) = delete; // Not assignable
+ 
+   /*
+-   * \brief Initialize service broker components, when the add-on is created.
++   * \brief Initialize service broker components, when the first add-on instance is created.
+    */
+-  void Initialize();
++  void Acquire();
+ 
+   static CSrvBroker* GetInstance()
+   {
+@@ -43,9 +44,10 @@ public:
+   }
+ 
+   /*
+-   * \brief Deinitialize service broker components, when the add-on is terminated.
++   * \brief Deinitialize service broker components and stop the global thread pool,
++   *        when the last add-on instance is destroyed.
+    */
+-  void Deinitialize();
++  void Release();
+ 
+   /*
+    * \brief Get settings component, to manage add-on XML settings.
+@@ -60,4 +62,6 @@ private:
+   ~CSrvBroker();
+ 
+   std::unique_ptr<ADP::SETTINGS::CCompSettings> m_compSettings;
++  std::mutex m_mutex;
++  int m_refCount{0};
+ };
+diff --git a/src/main.cpp b/src/main.cpp
+index 1c6e2c83d5..9c37b04663 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -13,7 +13,6 @@
+ #include "SrvBroker.h"
+ #include "Stream.h"
+ #include "utils/GUIUtils.h"
+-#include "utils/ThreadPool.h"
+ #include "utils/log.h"
+ 
+ using namespace PLAYLIST;
+@@ -22,7 +21,13 @@ using namespace SESSION;
+ CInputStreamAdaptive::CInputStreamAdaptive(const kodi::addon::IInstanceInfo& instance)
+   : CInstanceInputStream(instance)
+ {
+-  CSrvBroker::GetInstance()->Initialize();
++  CSrvBroker::GetInstance()->Acquire();
++}
++
++CInputStreamAdaptive::~CInputStreamAdaptive()
++{
++  m_session = nullptr;
++  CSrvBroker::GetInstance()->Release();
+ }
+ 
+ ADDON_STATUS CInputStreamAdaptive::CreateInstance(const kodi::addon::IInstanceInfo& instance,
+@@ -57,8 +62,6 @@ void CInputStreamAdaptive::Close(void)
+ {
+   LOG::Log(LOGDEBUG, "Close()");
+   m_session = nullptr;
+-  UTILS::THREAD::GlobalThreadPool.Reset();
+-  CSrvBroker::GetInstance()->Deinitialize();
+ }
+ 
+ bool CInputStreamAdaptive::GetStreamIds(std::vector<unsigned int>& ids)
+diff --git a/src/main.h b/src/main.h
+index 267096845d..4822274649 100644
+--- a/src/main.h
++++ b/src/main.h
+@@ -24,6 +24,7 @@ class ATTR_DLL_LOCAL CInputStreamAdaptive : public kodi::addon::CInstanceInputSt
+ {
+ public:
+   CInputStreamAdaptive(const kodi::addon::IInstanceInfo& instance);
++  ~CInputStreamAdaptive() override;
+   ADDON_STATUS CreateInstance(const kodi::addon::IInstanceInfo& instance,
+                               KODI_ADDON_INSTANCE_HDL& hdl) override;
+ 
+diff --git a/src/test/CMakeLists.txt b/src/test/CMakeLists.txt
+index 38a7c1da52..93eceda576 100644
+--- a/src/test/CMakeLists.txt
++++ b/src/test/CMakeLists.txt
+@@ -52,6 +52,7 @@ add_executable(${BINARY}
+     ../utils/JsonUtils.cpp
+     ../utils/oscompat.cpp
+     ../utils/StringUtils.cpp
++    ../utils/ThreadPool.cpp
+     ../utils/UrlUtils.cpp
+     ../utils/Utils.cpp
+     ../utils/XMLUtils.cpp
+diff --git a/src/test/TestDASHTree.cpp b/src/test/TestDASHTree.cpp
+index 5ee2a65099..b2625b0061 100644
+--- a/src/test/TestDASHTree.cpp
++++ b/src/test/TestDASHTree.cpp
+@@ -24,7 +24,7 @@ class DASHTreeTest : public ::testing::Test
+ protected:
+   void SetUp() override
+   {
+-    CSrvBroker::GetInstance()->Initialize();
++    CSrvBroker::GetInstance()->Acquire();
+     m_reprChooser = new CTestRepresentationChooserDefault();
+     tree = new DASHTestTree();
+   }
+@@ -37,6 +37,7 @@ protected:
+     tree = nullptr;
+     delete m_reprChooser;
+     m_reprChooser = nullptr;
++    CSrvBroker::GetInstance()->Release();
+   }
+ 
+   void OpenTestFile(std::string filePath) { OpenTestFile(filePath, "http://foo.bar/" + filePath); }
+diff --git a/src/test/TestHLSTree.cpp b/src/test/TestHLSTree.cpp
+index 37bbce233e..8dc8340e64 100644
+--- a/src/test/TestHLSTree.cpp
++++ b/src/test/TestHLSTree.cpp
+@@ -20,7 +20,7 @@ class HLSTreeTest : public ::testing::Test
+ protected:
+   void SetUp() override
+   {
+-    CSrvBroker::GetInstance()->Initialize();
++    CSrvBroker::GetInstance()->Acquire();
+     m_reprChooser = new CTestRepresentationChooserDefault();
+     tree = new HLSTestTree();
+   }
+@@ -33,6 +33,7 @@ protected:
+     tree = nullptr;
+     delete m_reprChooser;
+     m_reprChooser = nullptr;
++    CSrvBroker::GetInstance()->Release();
+   }
+ 
+   void OpenTestFileMaster(std::string filePath)
+diff --git a/src/test/TestSmoothTree.cpp b/src/test/TestSmoothTree.cpp
+index 88e1e8a75e..6cd70465ff 100644
+--- a/src/test/TestSmoothTree.cpp
++++ b/src/test/TestSmoothTree.cpp
+@@ -21,7 +21,7 @@ class SmoothTreeTest : public ::testing::Test
+ protected:
+   void SetUp() override
+   {
+-    CSrvBroker::GetInstance()->Initialize();
++    CSrvBroker::GetInstance()->Acquire();
+     m_reprChooser = new CTestRepresentationChooserDefault();
+     tree = new SmoothTestTree();
+   }
+@@ -34,6 +34,7 @@ protected:
+     tree = nullptr;
+     delete m_reprChooser;
+     m_reprChooser = nullptr;
++    CSrvBroker::GetInstance()->Release();
+   }
+ 
+   void OpenTestFile(std::string filePath) { OpenTestFile(filePath, "http://foo.bar/" + filePath); }
+diff --git a/src/utils/ThreadPool.cpp b/src/utils/ThreadPool.cpp
+index e2d00a55ac..bd6eebcabf 100644
+--- a/src/utils/ThreadPool.cpp
++++ b/src/utils/ThreadPool.cpp
+@@ -24,8 +24,11 @@ void UTILS::THREAD::ThreadPool::Stop()
+ void UTILS::THREAD::ThreadPool::Reset()
+ {
+   Stop();
++
++  std::lock_guard lock(m_mutex);
+   m_activeExecutors = 0;
+   m_executors.clear();
++  m_taskQueue = {};
+   m_isStopped = false;
+ }
+ 
