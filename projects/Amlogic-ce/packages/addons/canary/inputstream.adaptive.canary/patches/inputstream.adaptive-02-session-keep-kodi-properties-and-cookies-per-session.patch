@@ -1,0 +1,1619 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 9 Nov 2026 21:55:11 -0600
+Subject: [PATCH 02/10] [Session] Keep Kodi properties and cookies per session
+
+The service broker held the Kodi properties, cookies, screen info and
+manifest tree as process-wide state. A second add-on instance replaced
+them with its own, and closing one instance destroyed them under the
+other.
+---
+ src/CompKodiProps.cpp                         |  2 +-
+ src/CompKodiProps.h                           |  4 +-
+ src/CompResources.h                           | 37 ----------------
+ src/Session.cpp                               | 27 +++++++-----
+ src/Session.h                                 | 14 ++++--
+ src/SrvBroker.cpp                             | 16 -------
+ src/SrvBroker.h                               | 43 -------------------
+ src/codechandler/TTMLCodecHandler.cpp         | 11 +----
+ src/codechandler/TTMLCodecHandler.h           |  5 ++-
+ src/common/AdaptiveStream.cpp                 |  7 ++-
+ src/common/AdaptiveStream.h                   |  1 +
+ src/common/AdaptiveTree.cpp                   | 18 +++++---
+ src/common/AdaptiveTree.h                     | 21 +++++++++
+ src/common/Chooser.cpp                        | 11 ++---
+ src/common/Chooser.h                          | 10 ++++-
+ src/decrypters/DrmEngine.cpp                  | 12 ++++--
+ src/decrypters/DrmEngine.h                    |  8 +++-
+ src/decrypters/DrmEngineDefines.h             | 14 ++++++
+ .../ClearKeyCencSingleSampleDecrypter.cpp     |  5 ++-
+ .../ClearKeyCencSingleSampleDecrypter.h       |  1 +
+ src/decrypters/clearkey/ClearKeyDecrypter.cpp |  2 +-
+ .../widevine/WVCencSingleSampleDecrypter.cpp  |  2 +-
+ .../WVCencSingleSampleDecrypter.cpp           |  5 ++-
+ src/main.cpp                                  | 13 +++---
+ src/main.h                                    |  1 +
+ src/parser/DASHTree.cpp                       | 27 +++++++-----
+ src/parser/DASHTree.h                         |  2 +
+ src/parser/HLSTree.cpp                        | 15 ++++---
+ src/parser/HLSTree.h                          |  2 +
+ src/parser/SmoothTree.cpp                     |  5 +--
+ src/samplereader/FragmentedSampleReader.cpp   |  5 ++-
+ src/samplereader/FragmentedSampleReader.h     |  1 +
+ src/samplereader/SubtitleSampleReader.cpp     | 16 +++----
+ src/samplereader/SubtitleSampleReader.h       |  3 +-
+ src/test/TestDASHTree.cpp                     |  7 ++-
+ src/test/TestHLSTree.cpp                      |  7 ++-
+ src/test/TestSmoothTree.cpp                   |  8 +++-
+ src/utils/CurlUtils.cpp                       | 33 ++++++++------
+ src/utils/CurlUtils.h                         | 32 +++++++++++++-
+ 39 files changed, 239 insertions(+), 214 deletions(-)
+
+diff --git a/src/CompKodiProps.cpp b/src/CompKodiProps.cpp
+index d76762270c..109eb989a9 100644
+--- a/src/CompKodiProps.cpp
++++ b/src/CompKodiProps.cpp
+@@ -95,7 +95,7 @@ void LogDrmJsonDictKeys(std::string_view keyName,
+ }
+ } // unnamed namespace
+ 
+-void ADP::KODI_PROPS::CCompKodiProps::InitStage1(const std::map<std::string, std::string>& props)
++ADP::KODI_PROPS::CCompKodiProps::CCompKodiProps(const std::map<std::string, std::string>& props)
+ {
+   std::string licenseUrl;
+ 
+diff --git a/src/CompKodiProps.h b/src/CompKodiProps.h
+index ad0e547c0d..3a7a74b70d 100644
+--- a/src/CompKodiProps.h
++++ b/src/CompKodiProps.h
+@@ -160,11 +160,9 @@ struct DrmCfg
+ class ATTR_DLL_LOCAL CCompKodiProps
+ {
+ public:
+-  CCompKodiProps() = default;
++  CCompKodiProps(const std::map<std::string, std::string>& props);
+   ~CCompKodiProps() = default;
+ 
+-  void InitStage1(const std::map<std::string, std::string>& props);
+-
+   // \brief HTTP headers used for any HTTP request
+   const std::map<std::string, std::string>& GetCommonHeaders() const { return m_commonHeaders; }
+ 
+diff --git a/src/CompResources.h b/src/CompResources.h
+index b9650eb252..81276f7c90 100644
+--- a/src/CompResources.h
++++ b/src/CompResources.h
+@@ -21,12 +21,6 @@
+ #include <string>
+ #include <unordered_set>
+ 
+-// forwards
+-namespace adaptive
+-{
+-class AdaptiveTree;
+-}
+-
+ namespace ADP
+ {
+ namespace RESOURCES
+@@ -53,28 +47,6 @@ public:
+   CCompResources() = default;
+   ~CCompResources() = default;
+ 
+-  void InitStage2(adaptive::AdaptiveTree* tree) { m_tree = tree; }
+-
+-  /*!
+-   * \brief Get the current screen info.
+-   * \return The screen info.
+-   */
+-  ScreenInfo GetScreenInfo()
+-  {
+-    std::lock_guard<std::mutex> lock(m_screenInfoMutex);
+-    return m_screenInfo;
+-  }
+-
+-  /*!
+-   * \brief Set the screen info.
+-   * \param screenInfo The scren info
+-   */
+-  void SetScreenInfo(const ScreenInfo& screenInfo)
+-  {
+-    std::lock_guard<std::mutex> lock(m_screenInfoMutex);
+-    m_screenInfo = screenInfo;
+-  }
+-
+   /*!
+    * \brief Cookies that can be shared along with HTTP requests.
+    *        Some video services require you to accept cookies and send cookies along with requests.
+@@ -88,18 +60,9 @@ public:
+ 
+   std::mutex& GetCookiesMutex() { return m_cookiesMutex; }
+ 
+-  /*!
+-   * \brief Get the manifest tree.
+-   * \return The manifest tree.
+-   */
+-  const adaptive::AdaptiveTree& GetTree() const { return *m_tree; }
+-
+ private:
+-  ScreenInfo m_screenInfo;
+-  std::mutex m_screenInfoMutex;
+   std::unordered_set<UTILS::CURL::Cookie> m_cookies;
+   std::mutex m_cookiesMutex;
+-  adaptive::AdaptiveTree* m_tree{nullptr};
+ };
+ } // namespace RESOURCES
+ } // namespace ADP
+diff --git a/src/Session.cpp b/src/Session.cpp
+index cc657d204c..4efd63e11a 100644
+--- a/src/Session.cpp
++++ b/src/Session.cpp
+@@ -82,6 +82,11 @@ uint64_t PTSToElapsed(uint64_t pts, CStream* stream)
+ }
+ } // unnamed namespace
+ 
++SESSION::CSession::CSession(const std::map<std::string, std::string>& kodiProps)
++  : m_kodiProps(kodiProps), m_drmEngine(m_kodiProps, m_resources)
++{
++}
++
+ SESSION::CSession::~CSession()
+ {
+   LOG::Log(LOGDEBUG, "CSession::~CSession()");
+@@ -110,9 +115,11 @@ void SESSION::CSession::DeleteStreams()
+ |   initialize
+ +---------------------------------------------------------------------*/
+ 
+-SResult SESSION::CSession::Initialize(std::string manifestUrl)
++SResult SESSION::CSession::Initialize(std::string manifestUrl,
++                                     const ADP::RESOURCES::ScreenInfo& screenInfo)
+ {
+-  m_reprChooser = CHOOSER::CreateRepresentationChooser();
++  m_reprChooser =
++      CHOOSER::CreateRepresentationChooser(m_kodiProps.GetChooserProps(), screenInfo);
+ 
+   switch (CSrvBroker::GetSettings().GetMediaType())
+   {
+@@ -130,7 +137,7 @@ SResult SESSION::CSession::Initialize(std::string manifestUrl)
+       m_mediaTypeMask = static_cast<uint8_t>(~0);
+   }
+ 
+-  auto& kodiProps = CSrvBroker::GetKodiProps();
++  auto& kodiProps = m_kodiProps;
+   std::map<std::string, std::string> manifestHeaders = kodiProps.GetManifestHeaders();
+ 
+   DRM::DRMSession session;
+@@ -148,7 +155,8 @@ SResult SESSION::CSession::Initialize(std::string manifestUrl)
+   URL::AppendParameters(manifestUrl, kodiProps.GetManifestParams());
+ 
+   CURL::HTTPResponse manifestResp;
+-  if (!CURL::DownloadFile(manifestUrl, manifestHeaders, {"etag", "last-modified"}, manifestResp))
++  if (!CURL::DownloadFile(manifestUrl, m_kodiProps, m_resources, manifestHeaders,
++                          {"etag", "last-modified"}, manifestResp))
+     return SResult::Error(GUI::GetLocalizedString(30307));
+ 
+   // The download speed with small file sizes is not accurate, we should download at least 512Kb
+@@ -169,7 +177,8 @@ SResult SESSION::CSession::Initialize(std::string manifestUrl)
+     return SResult::Error(GUI::GetLocalizedString(30308));
+   }
+ 
+-  m_adaptiveTree->Configure(m_reprChooser, kodiProps.GetManifestUpdParams());
++  m_adaptiveTree->Configure(m_reprChooser, m_kodiProps, m_resources,
++                            kodiProps.GetManifestUpdParams());
+ 
+   if (!m_adaptiveTree->Open(manifestResp.effectiveUrl, manifestResp.headers, manifestResp.data))
+   {
+@@ -180,8 +189,6 @@ SResult SESSION::CSession::Initialize(std::string manifestUrl)
+   m_adaptiveTree->PostOpen();
+   m_reprChooser->PostInit();
+ 
+-  CSrvBroker::GetInstance()->InitStage2(m_adaptiveTree);
+-
+   InitializePeriod();
+ 
+   return SResultCode::OK;
+@@ -189,7 +196,7 @@ SResult SESSION::CSession::Initialize(std::string manifestUrl)
+ 
+ bool SESSION::CSession::CheckPlayableStreams(PLAYLIST::CPeriod* period)
+ {
+-  auto& kodiPropCfg = CSrvBroker::GetKodiProps().GetConfig();
++  auto& kodiPropCfg = m_kodiProps.GetConfig();
+ 
+   if (kodiPropCfg.resolutionLimit == 0 &&
+       kodiPropCfg.hdcpCheck == ADP::KODI_PROPS::HdcpCheckType::DEFAULT)
+@@ -795,9 +802,9 @@ uint64_t SESSION::CSession::GetTotalTimeMs() const
+     return m_adaptiveTree->m_totalTime;
+ }
+ 
+-void SESSION::CSession::OnScreenResChange()
++void SESSION::CSession::OnScreenResChange(const ADP::RESOURCES::ScreenInfo& screenInfo)
+ {
+-  m_reprChooser->OnUpdateScreenRes();
++  m_reprChooser->OnUpdateScreenRes(screenInfo);
+ };
+ 
+ bool SESSION::CSession::GetNextSample(ISampleReader*& sampleReader)
+diff --git a/src/Session.h b/src/Session.h
+index 1a35a7b7f3..26d68edda6 100644
+--- a/src/Session.h
++++ b/src/Session.h
+@@ -8,6 +8,8 @@
+ 
+ #pragma once
+ 
++#include "CompKodiProps.h"
++#include "CompResources.h"
+ #include "Stream.h"
+ #include "common/AdaptiveStream.h"
+ #include "common/AdaptiveTree.h"
+@@ -19,7 +21,9 @@
+ #include <kodi/platform/android/System.h>
+ #endif
+ 
++#include <map>
+ #include <memory>
++#include <string>
+ 
+ class Adaptive_CencSingleSampleDecrypter;
+ 
+@@ -28,16 +32,17 @@ namespace SESSION
+ class ATTR_DLL_LOCAL CSession : public adaptive::AdaptiveStreamObserver
+ {
+ public:
+-  CSession() = default;
++  CSession(const std::map<std::string, std::string>& kodiProps);
+   virtual ~CSession();
+ 
+   void DeleteStreams();
+ 
+   /*! \brief Initialize the session
+    *  \param manifestUrl The manifest URL
++   *  \param screenInfo The screen info
+    *  \return True if has success, false otherwise
+    */
+-  SResult Initialize(std::string manifestUrl);
++  SResult Initialize(std::string manifestUrl, const ADP::RESOURCES::ScreenInfo& screenInfo);
+ 
+   bool CheckPlayableStreams(PLAYLIST::CPeriod* period);
+ 
+@@ -131,8 +136,9 @@ public:
+ 
+   /*!
+    * \brief Callback for screen resolution change.
++   * \param screenInfo The screen info
+    */
+-  void OnScreenResChange();
++  void OnScreenResChange(const ADP::RESOURCES::ScreenInfo& screenInfo);
+ 
+   /*!
+    * \brief Seek streams and readers to a specified time.
+@@ -257,6 +263,8 @@ protected:
+   uint64_t GetMediaDurationMs();
+ 
+ private:
++  ADP::KODI_PROPS::CCompKodiProps m_kodiProps;
++  ADP::RESOURCES::CCompResources m_resources;
+   DRM::CDRMEngine m_drmEngine;
+ 
+   adaptive::AdaptiveTree* m_adaptiveTree{nullptr};
+diff --git a/src/SrvBroker.cpp b/src/SrvBroker.cpp
+index 1947234ce0..03ea8063e8 100644
+--- a/src/SrvBroker.cpp
++++ b/src/SrvBroker.cpp
+@@ -8,8 +8,6 @@
+ 
+ #include "SrvBroker.h"
+ 
+-#include "CompKodiProps.h"
+-#include "CompResources.h"
+ #include "CompSettings.h"
+ 
+ using namespace ADP;
+@@ -19,24 +17,10 @@ CSrvBroker::~CSrvBroker() = default;
+ 
+ void CSrvBroker::Initialize()
+ {
+-  m_compKodiProps = std::make_unique<KODI_PROPS::CCompKodiProps>();
+-  m_compResources = std::make_unique<RESOURCES::CCompResources>();
+   m_compSettings = std::make_unique<SETTINGS::CCompSettings>();
+ }
+ 
+-void CSrvBroker::InitStage1(const std::map<std::string, std::string>& kodiProps)
+-{
+-  m_compKodiProps->InitStage1(kodiProps);
+-}
+-
+-void CSrvBroker::InitStage2(adaptive::AdaptiveTree* tree)
+-{
+-  m_compResources->InitStage2(tree);
+-}
+-
+ void CSrvBroker::Deinitialize()
+ {
+-  m_compKodiProps.reset();
+-  m_compResources.reset();
+   m_compSettings.reset();
+ }
+diff --git a/src/SrvBroker.h b/src/SrvBroker.h
+index 09b1968c0b..bed186e7c1 100644
+--- a/src/SrvBroker.h
++++ b/src/SrvBroker.h
+@@ -14,27 +14,13 @@
+ #include <kodi/AddonBase.h>
+ #endif
+ 
+-#include <map>
+ #include <memory>
+-#include <string>
+ 
+ // forward
+-namespace ADP::RESOURCES
+-{
+-class CCompResources;
+-}
+ namespace ADP::SETTINGS
+ {
+ class CCompSettings;
+ }
+-namespace ADP::KODI_PROPS
+-{
+-class CCompKodiProps;
+-}
+-namespace adaptive
+-{
+-class AdaptiveTree;
+-}
+ 
+ /*
+  * \brief Service broker is a singleton that give an easy access to the resources from anywhere in the code.
+@@ -50,17 +36,6 @@ public:
+    */
+   void Initialize();
+ 
+-  /*
+-   * \brief Initialize service broker components, on addon initialization.
+-   */
+-  void InitStage1(const std::map<std::string, std::string>& kodiProps);
+-
+-  /*
+-   * \brief Initialize service broker components, on session initialization.
+-   * \param tree The adaptive tree
+-   */
+-  void InitStage2(adaptive::AdaptiveTree* tree);
+-
+   static CSrvBroker* GetInstance()
+   {
+     static CSrvBroker instance;
+@@ -72,22 +47,6 @@ public:
+    */
+   void Deinitialize();
+ 
+-  /*
+-   * \brief Get Kodi properties component, to read Kodi (Listitem / playlist files "STRM") properties.
+-   */
+-  static ADP::KODI_PROPS::CCompKodiProps& GetKodiProps()
+-  {
+-    return *GetInstance()->m_compKodiProps;
+-  }
+-
+-  /*
+-   * \brief Get resources component, for shared resources.
+-   */
+-  static ADP::RESOURCES::CCompResources& GetResources()
+-  {
+-    return *GetInstance()->m_compResources;
+-  }
+-
+   /*
+    * \brief Get settings component, to manage add-on XML settings.
+    */
+@@ -100,7 +59,5 @@ private:
+   CSrvBroker();
+   ~CSrvBroker();
+ 
+-  std::unique_ptr<ADP::KODI_PROPS::CCompKodiProps> m_compKodiProps;
+-  std::unique_ptr<ADP::RESOURCES::CCompResources> m_compResources;
+   std::unique_ptr<ADP::SETTINGS::CCompSettings> m_compSettings;
+ };
+diff --git a/src/codechandler/TTMLCodecHandler.cpp b/src/codechandler/TTMLCodecHandler.cpp
+index 53d143251e..8bd168a947 100644
+--- a/src/codechandler/TTMLCodecHandler.cpp
++++ b/src/codechandler/TTMLCodecHandler.cpp
+@@ -8,10 +8,6 @@
+ 
+ #include "TTMLCodecHandler.h"
+ 
+-#include "CompResources.h"
+-#include "SrvBroker.h"
+-#include "common/AdaptiveTree.h"
+-
+ // Kodi dont support TTML, so TTML is converted into "Text Subtitle Decoder" Kodi format
+ // managed with Kodi core overlay decoder "CDVDOverlayCodecText".
+ // This format must contain only subtitle text formatted as STR (SubRip) format in the packet data.
+@@ -45,12 +41,9 @@ void TTMLCodecHandler::SetPTSOffset(AP4_UI64 offset)
+     m_ptsOffset = offset;
+ }
+ 
+-TTMLCodecHandler::TTMLCodecHandler(AP4_SampleDescription* sd, bool isFile)
+-  : CodecHandler(sd), m_ttml(isFile)
++TTMLCodecHandler::TTMLCodecHandler(AP4_SampleDescription* sd, bool isFile, bool isTimeRelative)
++  : CodecHandler(sd), m_ttml(isFile), m_isTimeRelative(isTimeRelative)
+ {
+-  // For Miscrosoft Smooth Streaming, the subtitle time is relative to sample time,
+-  // in this case its needed apply an offset.
+-  m_isTimeRelative = CSrvBroker::GetResources().GetTree().IsTTMLTimeRelative();
+ }
+ 
+ bool TTMLCodecHandler::Transform(AP4_UI64 pts,
+diff --git a/src/codechandler/TTMLCodecHandler.h b/src/codechandler/TTMLCodecHandler.h
+index 4596b9a13b..566860decd 100644
+--- a/src/codechandler/TTMLCodecHandler.h
++++ b/src/codechandler/TTMLCodecHandler.h
+@@ -19,8 +19,9 @@ public:
+    * \param sd The MP4 sample description, for MP4 segmented case.
+    * \param isFile Specify if parsing a single "sidecar" file
+    *               (subtitles for the whole duration of the video content).
++   * \param isTimeRelative Specify if the subtitle time is relative to sample time.
+    */
+-  TTMLCodecHandler(AP4_SampleDescription* sd, bool isFile);
++  TTMLCodecHandler(AP4_SampleDescription* sd, bool isFile, bool isTimeRelative);
+ 
+   bool Transform(AP4_UI64 pts, AP4_UI32 duration, AP4_DataBuffer& buf, AP4_UI64 timescale) override;
+   bool ReadNextSample(AP4_Sample& sample, AP4_DataBuffer& buf) override;
+@@ -31,5 +32,5 @@ public:
+ private:
+   TTML2SRT m_ttml;
+   AP4_UI64 m_ptsOffset{0};
+-  bool m_isTimeRelative;
++  bool m_isTimeRelative{false};
+ };
+diff --git a/src/common/AdaptiveStream.cpp b/src/common/AdaptiveStream.cpp
+index d706890ee4..98d1462a00 100644
+--- a/src/common/AdaptiveStream.cpp
++++ b/src/common/AdaptiveStream.cpp
+@@ -14,7 +14,6 @@
+ #endif
+ #include "Chooser.h"
+ #include "CompKodiProps.h"
+-#include "SrvBroker.h"
+ #include "utils/StringUtils.h"
+ #include "utils/CurlUtils.h"
+ #include "utils/UrlUtils.h"
+@@ -46,7 +45,7 @@ adaptive::AdaptiveStream::AdaptiveStream(AdaptiveTree* tree,
+     current_rep_(initialRepr),
+     lastUpdated_(std::chrono::system_clock::now())
+ {
+-  auto& kodiProps = CSrvBroker::GetKodiProps();
++  auto& kodiProps = m_tree->GetKodiProps();
+   m_streamParams = kodiProps.GetStreamParams();
+   m_streamHeaders = kodiProps.GetStreamHeaders();
+ 
+@@ -105,7 +104,7 @@ bool adaptive::AdaptiveStream::DownloadImpl(const DownloadInfo& downloadInfo,
+   // Append stream parameters
+   URL::AppendParameters(url, m_streamParams);
+ 
+-  CURL::CUrl curl{url};
++  CURL::CUrl curl{url, m_tree->GetKodiProps(), m_tree->GetResources()};
+   curl.AddHeaders(headers);
+ 
+   int statusCode = curl.Open();
+@@ -666,7 +665,7 @@ bool adaptive::AdaptiveStream::start_stream()
+   if (!current_rep_->current_segment_.has_value())
+   {
+     if (m_startEvent == EVENT_TYPE::STREAM_START && m_tree->IsLive() &&
+-        !m_tree->IsChangingPeriod() && !CSrvBroker::GetKodiProps().IsPlayTimeshift() &&
++        !m_tree->IsChangingPeriod() && !m_tree->GetKodiProps().IsPlayTimeshift() &&
+         !current_rep_->Timeline().IsEmpty())
+     {
+       uint64_t totalDurSecs{0};
+diff --git a/src/common/AdaptiveStream.h b/src/common/AdaptiveStream.h
+index 658a72ca2e..3cbd04e237 100644
+--- a/src/common/AdaptiveStream.h
++++ b/src/common/AdaptiveStream.h
+@@ -122,6 +122,7 @@ enum class EVENT_TYPE
+     PLAYLIST::CPeriod* getPeriod() { return current_period_; };
+     PLAYLIST::CAdaptationSet* getAdaptationSet() { return current_adp_; };
+     PLAYLIST::CRepresentation* getRepresentation() { return current_rep_; };
++    const AdaptiveTree& GetTree() const { return *m_tree; }
+ 
+     uint64_t GetCurrentPTSOffset() const { return currentPTSOffset_; }
+     uint64_t GetAbsolutePTSOffset() const { return absolutePTSOffset_; }
+diff --git a/src/common/AdaptiveTree.cpp b/src/common/AdaptiveTree.cpp
+index e57f5ac383..cd9b7ea5d2 100644
+--- a/src/common/AdaptiveTree.cpp
++++ b/src/common/AdaptiveTree.cpp
+@@ -30,6 +30,8 @@ namespace adaptive
+   AdaptiveTree::AdaptiveTree(const AdaptiveTree& left) : AdaptiveTree()
+   {
+     m_reprChooser = left.m_reprChooser;
++    m_kodiProps = left.m_kodiProps;
++    m_resources = left.m_resources;
+     m_manifestParams = left.m_manifestParams;
+     m_manifestHeaders = left.m_manifestHeaders;
+     m_settings = left.m_settings;
+@@ -41,21 +43,23 @@ namespace adaptive
+   }
+ 
+   void AdaptiveTree::Configure(CHOOSER::IRepresentationChooser* reprChooser,
++                               const ADP::KODI_PROPS::CCompKodiProps& kodiProps,
++                               ADP::RESOURCES::CCompResources& resources,
+                                const std::string& manifestUpdParams)
+   {
+     m_reprChooser = reprChooser;
++    m_kodiProps = &kodiProps;
++    m_resources = &resources;
+ 
+-    auto srvBroker = CSrvBroker::GetInstance();
+-
+-    if (srvBroker->GetSettings().IsDebugManifest())
++    if (CSrvBroker::GetSettings().IsDebugManifest())
+     {
+       m_pathSaveManifest = FILESYS::PathCombine(FILESYS::GetAddonUserPath(), "manifests");
+       // Delete previously saved manifest files
+       FILESYS::RemoveDirectory(m_pathSaveManifest, false);
+     }
+ 
+-    m_manifestParams = srvBroker->GetKodiProps().GetManifestParams();
+-    m_manifestHeaders = srvBroker->GetKodiProps().GetManifestHeaders();
++    m_manifestParams = kodiProps.GetManifestParams();
++    m_manifestHeaders = kodiProps.GetManifestHeaders();
+     m_manifestUpdParams = manifestUpdParams;
+     stream_start_ = GetTimestamp();
+ 
+@@ -120,7 +124,7 @@ namespace adaptive
+     // A manifest can provide live delay value, if not so we use our default
+     // value of 16 secs, this is needed to ensure an appropriate playback,
+     // an add-on can override the delay to try fix edge use cases
+-    uint64_t liveDelay = CSrvBroker::GetKodiProps().GetManifestConfig().liveDelay;
++    uint64_t liveDelay = m_kodiProps->GetManifestConfig().liveDelay;
+     if (liveDelay >= 16)
+       m_liveDelay = liveDelay;
+     else if (m_liveDelay < 16)
+@@ -152,7 +156,7 @@ namespace adaptive
+   void AdaptiveTree::OverrideStreamsMediaFlags(
+       std::vector<std::unique_ptr<PLAYLIST::CPeriod>>& periods)
+   {
+-    const auto& config = CSrvBroker::GetKodiProps().GetConfig();
++    const auto& config = m_kodiProps->GetConfig();
+ 
+     const std::string& audioLangCodeDef = config.mediaAudioLangCodeDef;
+     const std::string& audioLangCodeOrig = config.mediaAudioLangCodeOrig;
+diff --git a/src/common/AdaptiveTree.h b/src/common/AdaptiveTree.h
+index db26abad00..7a99e29a2d 100644
+--- a/src/common/AdaptiveTree.h
++++ b/src/common/AdaptiveTree.h
+@@ -35,6 +35,17 @@ namespace CHOOSER
+ {
+ class IRepresentationChooser;
+ }
++namespace ADP
++{
++namespace KODI_PROPS
++{
++class CCompKodiProps;
++}
++namespace RESOURCES
++{
++class CCompResources;
++}
++} // namespace ADP
+ 
+ namespace adaptive
+ {
+@@ -80,9 +91,13 @@ public:
+   /*!
+    * \brief Configure the adaptive tree.
+    * \param reprChooser The representation chooser
++   * \param kodiProps The Kodi properties of the session
++   * \param resources The resources of the session
+    * \param manifestUpdParams Parameters to be add to manifest request url, depends on manifest implementation
+    */
+   virtual void Configure(CHOOSER::IRepresentationChooser* reprChooser,
++                         const ADP::KODI_PROPS::CCompKodiProps& kodiProps,
++                         ADP::RESOURCES::CCompResources& resources,
+                          const std::string& manifestUpdParams);
+ 
+   /*
+@@ -260,6 +275,10 @@ public:
+ 
+   CHOOSER::IRepresentationChooser* GetRepChooser() { return m_reprChooser; }
+ 
++  const ADP::KODI_PROPS::CCompKodiProps& GetKodiProps() const { return *m_kodiProps; }
++
++  ADP::RESOURCES::CCompResources& GetResources() const { return *m_resources; }
++
+   int SecondsSinceRepUpdate(PLAYLIST::CRepresentation* rep)
+   {
+     return static_cast<int>(
+@@ -435,6 +454,8 @@ protected:
+   std::string m_manifestParams;
+   std::map<std::string, std::string> m_manifestHeaders;
+   CHOOSER::IRepresentationChooser* m_reprChooser{nullptr};
++  const ADP::KODI_PROPS::CCompKodiProps* m_kodiProps{nullptr};
++  ADP::RESOURCES::CCompResources* m_resources{nullptr};
+ 
+   // Provide the path where the manifests will be saved, if debug enabled
+   std::string m_pathSaveManifest;
+diff --git a/src/common/Chooser.cpp b/src/common/Chooser.cpp
+index 8cc842ded5..c24cf8513b 100644
+--- a/src/common/Chooser.cpp
++++ b/src/common/Chooser.cpp
+@@ -47,12 +47,11 @@ IRepresentationChooser* GetReprChooser(std::string_view type)
+ }
+ } // unnamed namespace
+ 
+-IRepresentationChooser* CHOOSER::CreateRepresentationChooser()
++IRepresentationChooser* CHOOSER::CreateRepresentationChooser(
++    const KODI_PROPS::ChooserProps& props, const RESOURCES::ScreenInfo& screenInfo)
+ {
+   IRepresentationChooser* reprChooser{nullptr};
+ 
+-  const KODI_PROPS::ChooserProps& props = CSrvBroker::GetKodiProps().GetChooserProps();
+-
+   // An add-on can override XML settings by using Kodi properties
+   if (!props.m_chooserType.empty())
+   {
+@@ -68,7 +67,7 @@ IRepresentationChooser* CHOOSER::CreateRepresentationChooser()
+   if (!reprChooser)
+     reprChooser = new CRepresentationChooserDefault();
+ 
+-  reprChooser->OnUpdateScreenRes();
++  reprChooser->OnUpdateScreenRes(screenInfo);
+   reprChooser->Initialize(props);
+ 
+   return reprChooser;
+@@ -79,10 +78,8 @@ CHOOSER::IRepresentationChooser::IRepresentationChooser()
+   m_isAdjustRefreshRate = UTILS::GUI::IsAdjustRefreshRateEnabled();
+ }
+ 
+-void CHOOSER::IRepresentationChooser::OnUpdateScreenRes()
++void CHOOSER::IRepresentationChooser::OnUpdateScreenRes(const ADP::RESOURCES::ScreenInfo& sInfo)
+ {
+-  const auto sInfo = CSrvBroker::GetResources().GetScreenInfo();
+-
+   LOG::Log(LOGINFO,
+            "[Repr. chooser] Resolution set: %dx%d, max allowed: %dx%d, Adjust refresh rate: %i",
+            sInfo.width, sInfo.height, sInfo.maxWidth, sInfo.maxHeight, m_isAdjustRefreshRate);
+diff --git a/src/common/Chooser.h b/src/common/Chooser.h
+index 1219e5aa82..a6252aa701 100644
+--- a/src/common/Chooser.h
++++ b/src/common/Chooser.h
+@@ -26,6 +26,10 @@ namespace ADP::KODI_PROPS
+ {
+ struct ChooserProps;
+ }
++namespace ADP::RESOURCES
++{
++struct ScreenInfo;
++}
+ 
+ namespace CHOOSER
+ {
+@@ -60,8 +64,9 @@ public:
+ 
+   /*!
+    * \brief Callback to update screen resolution.
++   * \param sInfo The screen info
+    */
+-  void OnUpdateScreenRes();
++  void OnUpdateScreenRes(const ADP::RESOURCES::ScreenInfo& sInfo);
+ 
+   /*!
+    * \brief Set the current download speed.
+@@ -146,6 +151,7 @@ private:
+   bool m_isAdjustRefreshRate{false};
+ };
+ 
+-IRepresentationChooser* CreateRepresentationChooser();
++IRepresentationChooser* CreateRepresentationChooser(const ADP::KODI_PROPS::ChooserProps& props,
++                                                    const ADP::RESOURCES::ScreenInfo& screenInfo);
+ 
+ } // namespace CHOOSER
+diff --git a/src/decrypters/DrmEngine.cpp b/src/decrypters/DrmEngine.cpp
+index f6d466cc10..3a8492c731 100644
+--- a/src/decrypters/DrmEngine.cpp
++++ b/src/decrypters/DrmEngine.cpp
+@@ -226,7 +226,7 @@ bool DRM::CDRMEngine::Initialize()
+   // by default ClearKey has the lowest priority since real DRMs should be preferred
+   std::vector<std::string_view> keySystemsPrio = {KS_WIDEVINE, KS_PLAYREADY, KS_WISEPLAY, KS_CLEARKEY};
+ 
+-  const auto& kodiProps = CSrvBroker::GetKodiProps();
++  const auto& kodiProps = m_kodiProps;
+   // Reorder the keysystems list by using the custom DRM configuration, if any
+   for (auto& [ks, cfg] : kodiProps.GetDrmConfigs())
+   {
+@@ -294,7 +294,7 @@ bool DRM::CDRMEngine::Initialize()
+ 
+ bool DRM::CDRMEngine::PreInitializeDRM(DRMSession& session)
+ {
+-  auto& kodiProps = CSrvBroker::GetKodiProps();
++  auto& kodiProps = m_kodiProps;
+ 
+   const auto propDrmCfg = kodiProps.GetDrmConfig(KS_WIDEVINE);
+ 
+@@ -343,6 +343,8 @@ bool DRM::CDRMEngine::PreInitializeDRM(DRMSession& session)
+   LOG::LogF(LOGDEBUG, "Initializing session with KID: %s", STRING::ToHexadecimal(kidData).c_str());
+ 
+   DRM::Config drmCfg = CreateDRMConfig(m_keySystem, kodiProps.GetDrmConfig(m_keySystem));
++  drmCfg.kodiProps = &m_kodiProps;
++  drmCfg.resources = &m_resources;
+ 
+   auto dec = drm->CreateSingleSampleDecrypter(drmCfg, kidData, CryptoMode::AES_CTR);
+ 
+@@ -386,7 +388,7 @@ const std::shared_ptr<DRMSession> DRM::CDRMEngine::InitializeSession(
+     kodi::addon::InputstreamInfo& streamInfo,
+     bool canCleanupSessions)
+ {
+-  const auto& kodiProps = CSrvBroker::GetKodiProps();
++  const auto& kodiProps = m_kodiProps;
+   
+   if (kodiProps.GetManifestConfig().ignoreMediaDefaultKid)
+     mediaDrmInfos.clear();
+@@ -560,6 +562,8 @@ const std::shared_ptr<DRMSession> DRM::CDRMEngine::InitializeSession(
+       newSes.kid = drmInfo.defaultKid;
+ 
+       DRM::Config drmCfg = DRM::CreateDRMConfig(m_keySystem, drmPropCfg);
++      drmCfg.kodiProps = &m_kodiProps;
++      drmCfg.resources = &m_resources;
+ 
+       newSes.decrypter = newSes.drm->CreateSingleSampleDecrypter(
+           drmCfg, drmInfoKidBytes,
+@@ -768,7 +772,7 @@ const std::shared_ptr<DRMSession> DRM::CDRMEngine::GetSession(const std::string&
+ 
+ bool DRM::CDRMEngine::ConfigureClearKey(std::vector<DRM::DRMInfo>& drmInfos)
+ {
+-  const auto& kodiProps = CSrvBroker::GetKodiProps();
++  const auto& kodiProps = m_kodiProps;
+ 
+   if (drmInfos.empty())
+     return false;
+diff --git a/src/decrypters/DrmEngine.h b/src/decrypters/DrmEngine.h
+index 5781df5e01..a68f27c734 100644
+--- a/src/decrypters/DrmEngine.h
++++ b/src/decrypters/DrmEngine.h
+@@ -29,7 +29,11 @@ namespace DRM
+ class ATTR_DLL_LOCAL CDRMEngine
+ {
+ public:
+-  CDRMEngine() = default;
++  CDRMEngine(const ADP::KODI_PROPS::CCompKodiProps& kodiProps,
++             ADP::RESOURCES::CCompResources& resources)
++    : m_kodiProps(kodiProps), m_resources(resources)
++  {
++  }
+   virtual ~CDRMEngine() = default;
+ 
+   /*!
+@@ -108,6 +112,8 @@ private:
+   // \brief Get a DRM instance for the specified key system, it will return nullptr if not found
+   std::shared_ptr<DRM::IDecrypter> GetDrmInstance(std::string_view ks) const;
+ 
++  const ADP::KODI_PROPS::CCompKodiProps& m_kodiProps;
++  ADP::RESOURCES::CCompResources& m_resources;
+   std::string m_keySystem; // Choosen key system
+   std::vector<DRMInstance> m_drms;
+   std::vector<std::shared_ptr<DRMSession>> m_sessions;
+diff --git a/src/decrypters/DrmEngineDefines.h b/src/decrypters/DrmEngineDefines.h
+index c52f9c6674..a5b8ef6600 100644
+--- a/src/decrypters/DrmEngineDefines.h
++++ b/src/decrypters/DrmEngineDefines.h
+@@ -23,6 +23,17 @@ namespace DRM
+ {
+ class IDecrypter;
+ }
++namespace ADP
++{
++namespace KODI_PROPS
++{
++class CCompKodiProps;
++}
++namespace RESOURCES
++{
++class CCompResources;
++}
++} // namespace ADP
+ 
+ namespace DRM
+ {
+@@ -96,6 +107,9 @@ struct Config
+   // Specifies if has been parsed the new DRM config ("drm" or "drm_legacy" kodi property)
+   //! @todo: to remove when deprecated DRM properties will be removed
+   bool isNewConfig{true};
++  // The session Kodi properties and resources, to make the license HTTP requests
++  const ADP::KODI_PROPS::CCompKodiProps* kodiProps{nullptr};
++  ADP::RESOURCES::CCompResources* resources{nullptr};
+ };
+ 
+ constexpr std::string_view ROBUSTNESS_HW_SECDEC = "HW_SECURE_DECODE";
+diff --git a/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.cpp b/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.cpp
+index 474a4e8720..b294deac00 100644
+--- a/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.cpp
++++ b/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.cpp
+@@ -31,9 +31,12 @@ uint32_t CClearKeyCencSingleSampleDecrypter::g_sessionIdCount = 1;
+ 
+ CClearKeyCencSingleSampleDecrypter::CClearKeyCencSingleSampleDecrypter(
+     const std::vector<uint8_t>& defaultKeyId,
++    const DRM::Config& config,
+     CClearKeyDecrypter* host)
+   : m_host(host), m_defaultKeyId(defaultKeyId)
+ {
++  m_config.kodiProps = config.kodiProps;
++  m_config.resources = config.resources;
+ }
+ 
+ void CClearKeyCencSingleSampleDecrypter::InitDecrypter()
+@@ -267,7 +270,7 @@ bool CClearKeyCencSingleSampleDecrypter::MakeLicenseRequest(
+     FILESYS::SaveFile(debugFilePath, postData.c_str(), true);
+   }
+ 
+-  CURL::CUrl curl{url, postData};
++  CURL::CUrl curl{url, *m_config.kodiProps, *m_config.resources, postData};
+   curl.AddHeader("Accept", "application/json");
+   curl.AddHeader("Content-Type", "application/json");
+   curl.AddHeaders(headers);
+diff --git a/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.h b/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.h
+index f58d2755f1..860dd1981b 100644
+--- a/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.h
++++ b/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.h
+@@ -21,6 +21,7 @@ class CClearKeyCencSingleSampleDecrypter : public Adaptive_CencSingleSampleDecry
+ {
+ public:
+   CClearKeyCencSingleSampleDecrypter(const std::vector<uint8_t>& defaultKeyId,
++                                     const DRM::Config& config,
+                                      CClearKeyDecrypter* host);
+   virtual ~CClearKeyCencSingleSampleDecrypter(){};
+ 
+diff --git a/src/decrypters/clearkey/ClearKeyDecrypter.cpp b/src/decrypters/clearkey/ClearKeyDecrypter.cpp
+index 38fc703b07..19f725387b 100644
+--- a/src/decrypters/clearkey/ClearKeyDecrypter.cpp
++++ b/src/decrypters/clearkey/ClearKeyDecrypter.cpp
+@@ -29,7 +29,7 @@ std::shared_ptr<Adaptive_CencSingleSampleDecrypter> CClearKeyDecrypter::CreateSi
+     return nullptr;
+   }
+ 
+-  return std::make_shared<CClearKeyCencSingleSampleDecrypter>(defaultkeyid, this);
++  return std::make_shared<CClearKeyCencSingleSampleDecrypter>(defaultkeyid, config, this);
+ }
+ 
+ std::optional<bool> CClearKeyDecrypter::HasLicenseKey(
+diff --git a/src/decrypters/widevine/WVCencSingleSampleDecrypter.cpp b/src/decrypters/widevine/WVCencSingleSampleDecrypter.cpp
+index a057115c9a..a6418bebc5 100644
+--- a/src/decrypters/widevine/WVCencSingleSampleDecrypter.cpp
++++ b/src/decrypters/widevine/WVCencSingleSampleDecrypter.cpp
+@@ -322,7 +322,7 @@ bool CWVCencSingleSampleDecrypter::SendSessionMessage()
+   std::string url = licConfig.serverUri;
+   DRM::TranslateLicenseUrlPh(url, challenge, drmCfg.isNewConfig);
+ 
+-  CURL::CUrl cUrl{url, reqData};
++  CURL::CUrl cUrl{url, *drmCfg.kodiProps, *drmCfg.resources, reqData};
+   cUrl.AddHeaders(licConfig.reqHeaders);
+ 
+   const int statusCode = cUrl.Open();
+diff --git a/src/decrypters/widevineandroid/WVCencSingleSampleDecrypter.cpp b/src/decrypters/widevineandroid/WVCencSingleSampleDecrypter.cpp
+index 1877f04132..5327825a9b 100644
+--- a/src/decrypters/widevineandroid/WVCencSingleSampleDecrypter.cpp
++++ b/src/decrypters/widevineandroid/WVCencSingleSampleDecrypter.cpp
+@@ -276,7 +276,8 @@ bool CWVCencSingleSampleDecrypterA::ProvisionRequest()
+   reqData += "\"}";
+   reqData = BASE64::Encode(reqData);
+ 
+-  CURL::CUrl file(url);
++  const DRM::Config& drmCfg = m_cdmAdapter->GetConfig();
++  CURL::CUrl file(url, *drmCfg.kodiProps, *drmCfg.resources);
+   file.AddHeader("Content-Type", "application/json");
+   file.AddHeader("postdata", reqData.c_str());
+ 
+@@ -428,7 +429,7 @@ bool CWVCencSingleSampleDecrypterA::SendSessionMessage(const std::vector<uint8_t
+   std::string url = licConfig.serverUri;
+   DRM::TranslateLicenseUrlPh(url, challenge, drmCfg.isNewConfig);
+ 
+-  CURL::CUrl cUrl{url, reqData};
++  CURL::CUrl cUrl{url, *drmCfg.kodiProps, *drmCfg.resources, reqData};
+   cUrl.AddHeaders(licConfig.reqHeaders);
+ 
+   const int statusCode = cUrl.Open();
+diff --git a/src/main.cpp b/src/main.cpp
+index 3165d713ef..1c6e2c83d5 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -40,11 +40,9 @@ bool CInputStreamAdaptive::Open(const kodi::addon::InputstreamProperty& props)
+ {
+   LOG::Log(LOGDEBUG, "Open()");
+ 
+-  CSrvBroker::GetInstance()->InitStage1(props.GetProperties());
++  m_session = std::make_shared<CSession>(props.GetProperties());
+ 
+-  m_session = std::make_shared<CSession>();
+-
+-  SResult ret = m_session->Initialize(props.GetURL());
++  SResult ret = m_session->Initialize(props.GetURL(), m_screenInfo);
+   if (ret.IsFailed())
+   {
+     LOG::Log(LOGERROR, ret.Message().c_str());
+@@ -447,14 +445,13 @@ void CInputStreamAdaptive::SetVideoResolution(unsigned int width,
+                                               unsigned int maxWidth,
+                                               unsigned int maxHeight)
+ {
+-  CSrvBroker::GetResources().SetScreenInfo({static_cast<int>(width), static_cast<int>(height),
+-                                            static_cast<int>(maxWidth),
+-                                            static_cast<int>(maxHeight)});
++  m_screenInfo = {static_cast<int>(width), static_cast<int>(height), static_cast<int>(maxWidth),
++                  static_cast<int>(maxHeight)};
+ 
+   // SetVideoResolution method is initially called before CInputStreamAdaptive::Open so there is no session yet
+   // After that, other callbacks may be made during playback (e.g. for window resize)
+   if (m_session)
+-    m_session->OnScreenResChange();
++    m_session->OnScreenResChange(m_screenInfo);
+ }
+ 
+ bool CInputStreamAdaptive::PosTime(int ms)
+diff --git a/src/main.h b/src/main.h
+index b56936da94..267096845d 100644
+--- a/src/main.h
++++ b/src/main.h
+@@ -57,6 +57,7 @@ public:
+ 
+ private:
+   std::shared_ptr<SESSION::CSession> m_session;
++  ADP::RESOURCES::ScreenInfo m_screenInfo;
+ 
+   bool m_checkCoreReopen{false}; // Check if Kodi core will reopen all streams
+ };
+diff --git a/src/parser/DASHTree.cpp b/src/parser/DASHTree.cpp
+index 761a5b179a..64b509eaa4 100644
+--- a/src/parser/DASHTree.cpp
++++ b/src/parser/DASHTree.cpp
+@@ -9,7 +9,6 @@
+ #include "DASHTree.h"
+ 
+ #include "CompKodiProps.h"
+-#include "SrvBroker.h"
+ #include "common/Period.h"
+ #include "decrypters/HelperPr.h"
+ #include "decrypters/Helpers.h"
+@@ -91,9 +90,12 @@ std::string DetectCodecFromMimeType(std::string_view mimeType)
+ }
+ 
+ // \brief Make an HTTP request to get UTC Timing and return the string
+-std::string RequestUTCTiming(const std::string& url, CURL::RequestType reqType)
++std::string RequestUTCTiming(const std::string& url,
++                             const ADP::KODI_PROPS::CCompKodiProps& kodiProps,
++                             ADP::RESOURCES::CCompResources& resources,
++                             CURL::RequestType reqType)
+ {
+-  CURL::CUrl curl(url, reqType);
++  CURL::CUrl curl(url, kodiProps, resources, reqType);
+   const int statusCode = curl.Open();
+   if (statusCode == -1 || statusCode >= 400)
+   {
+@@ -126,9 +128,11 @@ adaptive::CDashTree::CDashTree(const CDashTree& left) : AdaptiveTree(left)
+ }
+ 
+ void adaptive::CDashTree::Configure(CHOOSER::IRepresentationChooser* reprChooser,
++                                    const ADP::KODI_PROPS::CCompKodiProps& kodiProps,
++                                    ADP::RESOURCES::CCompResources& resources,
+                                     const std::string& manifestUpdParams)
+ {
+-  AdaptiveTree::Configure(reprChooser, manifestUpdParams);
++  AdaptiveTree::Configure(reprChooser, kodiProps, resources, manifestUpdParams);
+ }
+ 
+ bool adaptive::CDashTree::Open(const std::string& url,
+@@ -152,7 +156,7 @@ bool adaptive::CDashTree::Open(const std::string& url,
+ 
+   MergeAdpSets();
+ 
+-  auto& kodiProps = CSrvBroker::GetKodiProps();
++  auto& kodiProps = *m_kodiProps;
+   //! @todo: can have sense to move period selection on PostInit or another place
+   //! just before the session initialize period, that will be a common code for all manifest types,
+   //! also because the code related to live delay calculation on AdaptiveStream::start_stream
+@@ -230,7 +234,7 @@ bool adaptive::CDashTree::ParseManifest(const std::string& data)
+     // so limit it to avoid excessive memory consumption
+     m_tsbLimited = 14400000; // Default 4 hours
+ 
+-    auto& manifestCfg = CSrvBroker::GetKodiProps().GetManifestConfig();
++    auto& manifestCfg = m_kodiProps->GetManifestConfig();
+     if (manifestCfg.timeShiftBufferLimit.has_value())
+       m_tsbLimited = *manifestCfg.timeShiftBufferLimit * 1000;
+ 
+@@ -1424,7 +1428,7 @@ int64_t adaptive::CDashTree::ResolveUTCTiming(pugi::xml_node node)
+   std::vector<std::pair<std::string, std::string>> utcTimings;
+ 
+   // Custom UTC timing
+-  auto& manifestCfg = CSrvBroker::GetKodiProps().GetManifestConfig();
++  auto& manifestCfg = m_kodiProps->GetManifestConfig();
+   if (manifestCfg.dashUTCTiming.has_value())
+     utcTimings.emplace_back(*manifestCfg.dashUTCTiming);
+ 
+@@ -1442,8 +1446,8 @@ int64_t adaptive::CDashTree::ResolveUTCTiming(pugi::xml_node node)
+     if (scheme == "urn:mpeg:dash:utc:http-head:2012" ||
+         scheme == "urn:mpeg:dash:utc:http-head:2014")
+     {
+-      const uint64_t ts =
+-          UTILS::ConvertDate2822ToTs(RequestUTCTiming(value, CURL::RequestType::HEAD));
++      const uint64_t ts = UTILS::ConvertDate2822ToTs(
++          RequestUTCTiming(value, *m_kodiProps, *m_resources, CURL::RequestType::HEAD));
+       if (ts == 0)
+       {
+         LOG::LogF(LOGERROR, "UTCTiming conversion failed from scheme \"%s\"", scheme.c_str());
+@@ -1457,7 +1461,8 @@ int64_t adaptive::CDashTree::ResolveUTCTiming(pugi::xml_node node)
+              scheme == "urn:mpeg:dash:utc:http-xsdate:2012" ||
+              scheme == "urn:mpeg:dash:utc:http-iso:2012")
+     {
+-      const double ts = XML::ParseDate(RequestUTCTiming(value, CURL::RequestType::AUTO).c_str(), 0);
++      const double ts = XML::ParseDate(
++          RequestUTCTiming(value, *m_kodiProps, *m_resources, CURL::RequestType::AUTO).c_str(), 0);
+       if (ts == 0)
+       {
+         LOG::LogF(LOGERROR, "UTCTiming conversion failed from scheme \"%s\"", scheme.c_str());
+@@ -1551,7 +1556,7 @@ bool adaptive::CDashTree::DownloadManifestUpd(const std::string& url,
+                                               const std::vector<std::string>& respHeaders,
+                                               UTILS::CURL::HTTPResponse& resp)
+ {
+-  return CURL::DownloadFile(url, reqHeaders, respHeaders, resp);
++  return CURL::DownloadFile(url, *m_kodiProps, *m_resources, reqHeaders, respHeaders, resp);
+ }
+ 
+ void adaptive::CDashTree::OnRequestSegments(PLAYLIST::CPeriod* period,
+diff --git a/src/parser/DASHTree.h b/src/parser/DASHTree.h
+index 1368423034..0d3ea625d7 100644
+--- a/src/parser/DASHTree.h
++++ b/src/parser/DASHTree.h
+@@ -35,6 +35,8 @@ public:
+   CDashTree(const CDashTree& left);
+ 
+   void Configure(CHOOSER::IRepresentationChooser* reprChooser,
++                 const ADP::KODI_PROPS::CCompKodiProps& kodiProps,
++                 ADP::RESOURCES::CCompResources& resources,
+                  const std::string& manifestUpdParams) override;
+ 
+   virtual TreeType GetTreeType() const override { return TreeType::DASH; }
+diff --git a/src/parser/HLSTree.cpp b/src/parser/HLSTree.cpp
+index 9b8f0d19ef..b4a4a9f9b4 100644
+--- a/src/parser/HLSTree.cpp
++++ b/src/parser/HLSTree.cpp
+@@ -9,7 +9,6 @@
+ #include "HLSTree.h"
+ 
+ #include "CompKodiProps.h"
+-#include "SrvBroker.h"
+ #include "aes_decrypter.h"
+ #include "decrypters/HelperPr.h"
+ #include "decrypters/Helpers.h"
+@@ -164,9 +163,11 @@ adaptive::CHLSTree::CHLSTree(const CHLSTree& left) : AdaptiveTree(left)
+ }
+ 
+ void adaptive::CHLSTree::Configure(CHOOSER::IRepresentationChooser* reprChooser,
++                                   const ADP::KODI_PROPS::CCompKodiProps& kodiProps,
++                                   ADP::RESOURCES::CCompResources& resources,
+                                    const std::string& manifestUpdateParam)
+ {
+-  AdaptiveTree::Configure(reprChooser, manifestUpdateParam);
++  AdaptiveTree::Configure(reprChooser, kodiProps, resources, manifestUpdateParam);
+   m_decrypter = std::make_unique<AESDecrypter>();
+ }
+ 
+@@ -475,7 +476,7 @@ bool adaptive::CHLSTree::ProcessChildManifest(PLAYLIST::CPeriod* period,
+     PLAYLIST::CAdaptationSet* adp,
+     PLAYLIST::CRepresentation* rep)
+ {
+-  const auto& manifestCfg = CSrvBroker::GetKodiProps().GetManifestConfig();
++  const auto& manifestCfg = m_kodiProps->GetManifestConfig();
+   size_t adpSetPos = GetPtrPosition(period->GetAdaptationSets(), adp);
+   size_t reprPos = GetPtrPosition(adp->GetRepresentations(), rep);
+ 
+@@ -961,7 +962,7 @@ void adaptive::CHLSTree::OnDataArrived(uint64_t segNum,
+       if (aesKey->key.empty())
+       {
+         // RETRY:
+-        auto drmCfgProp = CSrvBroker::GetKodiProps().GetDrmConfig(DRM::KS_NONE);
++        auto drmCfgProp = m_kodiProps->GetDrmConfig(DRM::KS_NONE);
+ 
+         CURL::HTTPResponse resp;
+ 
+@@ -1084,7 +1085,7 @@ bool adaptive::CHLSTree::DownloadKey(const std::string& url,
+                                      const std::vector<std::string>& respHeaders,
+                                      UTILS::CURL::HTTPResponse& resp)
+ {
+-  return CURL::DownloadFile(url, reqHeaders, respHeaders, resp);
++  return CURL::DownloadFile(url, *m_kodiProps, *m_resources, reqHeaders, respHeaders, resp);
+ }
+ 
+ bool adaptive::CHLSTree::DownloadManifestChild(const std::string& url,
+@@ -1092,7 +1093,7 @@ bool adaptive::CHLSTree::DownloadManifestChild(const std::string& url,
+                                                const std::vector<std::string>& respHeaders,
+                                                UTILS::CURL::HTTPResponse& resp)
+ {
+-  return CURL::DownloadFile(url, reqHeaders, respHeaders, resp);
++  return CURL::DownloadFile(url, *m_kodiProps, *m_resources, reqHeaders, respHeaders, resp);
+ }
+ 
+ //! @todo: check updated variables that are not thread safe
+@@ -1419,7 +1420,7 @@ bool adaptive::CHLSTree::ParseRenditon(const Rendition& r,
+ 
+ bool adaptive::CHLSTree::ParseMultivariantPlaylist(const std::string& data)
+ {
+-  const auto& manifestCfg = CSrvBroker::GetKodiProps().GetManifestConfig();
++  const auto& manifestCfg = m_kodiProps->GetManifestConfig();
+   std::stringstream streamData{data};
+   MultivariantPlaylist pl;
+ 
+diff --git a/src/parser/HLSTree.h b/src/parser/HLSTree.h
+index 69a7bf97c8..9c7ca3d250 100644
+--- a/src/parser/HLSTree.h
++++ b/src/parser/HLSTree.h
+@@ -38,6 +38,8 @@ public:
+   virtual CHLSTree* Clone() const override { return new CHLSTree{*this}; }
+ 
+   virtual void Configure(CHOOSER::IRepresentationChooser* reprChooser,
++                         const ADP::KODI_PROPS::CCompKodiProps& kodiProps,
++                         ADP::RESOURCES::CCompResources& resources,
+                          const std::string& manifestUpdateParam) override;
+ 
+   virtual bool Open(const std::string& url,
+diff --git a/src/parser/SmoothTree.cpp b/src/parser/SmoothTree.cpp
+index 7a96af45a5..ee0eca7284 100644
+--- a/src/parser/SmoothTree.cpp
++++ b/src/parser/SmoothTree.cpp
+@@ -9,7 +9,6 @@
+ #include "SmoothTree.h"
+ 
+ #include "CompKodiProps.h"
+-#include "SrvBroker.h"
+ #include "decrypters/Helpers.h"
+ #include "decrypters/HelperPr.h"
+ #include "utils/StringUtils.h"
+@@ -108,7 +107,7 @@ bool adaptive::CSmoothTree::ParseManifest(const std::string& data)
+     {
+       m_dvrWindowLength = 14400000; // Limit to default 4 hours
+ 
+-      auto& manifestCfg = CSrvBroker::GetKodiProps().GetManifestConfig();
++      auto& manifestCfg = m_kodiProps->GetManifestConfig();
+       if (manifestCfg.timeShiftBufferLimit.has_value())
+         m_dvrWindowLength = *manifestCfg.timeShiftBufferLimit * 1000;
+     }
+@@ -643,7 +642,7 @@ bool adaptive::CSmoothTree::DownloadManifestUpd(
+     const std::vector<std::string>& respHeaders,
+     UTILS::CURL::HTTPResponse& resp)
+ {
+-  return CURL::DownloadFile(url, reqHeaders, respHeaders, resp);
++  return CURL::DownloadFile(url, *m_kodiProps, *m_resources, reqHeaders, respHeaders, resp);
+ }
+ 
+ void adaptive::CSmoothTree::UpdateTotalTime()
+diff --git a/src/samplereader/FragmentedSampleReader.cpp b/src/samplereader/FragmentedSampleReader.cpp
+index 61a9c46169..12845e3de4 100644
+--- a/src/samplereader/FragmentedSampleReader.cpp
++++ b/src/samplereader/FragmentedSampleReader.cpp
+@@ -9,6 +9,7 @@
+ #include "FragmentedSampleReader.h"
+ 
+ #include "AdaptiveByteStream.h"
++#include "Stream.h"
+ #include "codechandler/AV1CodecHandler.h"
+ #include "codechandler/AVCCodecHandler.h"
+ #include "codechandler/AudioCodecHandler.h"
+@@ -18,6 +19,7 @@
+ #include "codechandler/VP9CodecHandler.h"
+ #include "codechandler/WebVTTCodecHandler.h"
+ #include "common/AdaptiveCencSampleDecrypter.h"
++#include "common/AdaptiveTree.h"
+ #include "decrypters/Helpers.h"
+ #include "decrypters/HelperPr.h"
+ #include "utils/Bento4Utils.h"
+@@ -68,6 +70,7 @@ CFragmentedSampleReader::~CFragmentedSampleReader()
+ bool CFragmentedSampleReader::Initialize(SESSION::CStream* stream)
+ {
+   m_lReader->EnableTrack(m_track->GetId());
++  m_isTTMLTimeRelative = stream->m_adStream.GetTree().IsTTMLTimeRelative();
+ 
+   m_timeBaseExt = STREAM_TIME_BASE;
+   m_timeBaseInt = m_track->GetMediaTimeScale();
+@@ -713,7 +716,7 @@ void CFragmentedSampleReader::UpdateSampleDescription()
+         m_codecHandler = new HEVCCodecHandler(desc, m_track);
+         break;
+       case AP4_SAMPLE_FORMAT_STPP:
+-        m_codecHandler = new TTMLCodecHandler(desc, false);
++        m_codecHandler = new TTMLCodecHandler(desc, false, m_isTTMLTimeRelative);
+         break;
+       case FMP4_SAMPLE_FORMAT_WVTT:
+         m_codecHandler = new WebVTTCodecHandler(desc, false);
+diff --git a/src/samplereader/FragmentedSampleReader.h b/src/samplereader/FragmentedSampleReader.h
+index 4a60606afa..ac0ed0b28b 100644
+--- a/src/samplereader/FragmentedSampleReader.h
++++ b/src/samplereader/FragmentedSampleReader.h
+@@ -145,6 +145,7 @@ private:
+   bool m_bSampleDescChanged{false};
+   bool m_eos{false};
+   bool m_started{false};
++  bool m_isTTMLTimeRelative{false};
+   int64_t m_dts{0};
+   int64_t m_pts{0};
+   int64_t m_ptsDiff{0};
+diff --git a/src/samplereader/SubtitleSampleReader.cpp b/src/samplereader/SubtitleSampleReader.cpp
+index 2ac4c7d72a..3c0d99165d 100644
+--- a/src/samplereader/SubtitleSampleReader.cpp
++++ b/src/samplereader/SubtitleSampleReader.cpp
+@@ -9,8 +9,6 @@
+ #include "SubtitleSampleReader.h"
+ 
+ #include "CompKodiProps.h"
+-#include "CompResources.h"
+-#include "SrvBroker.h"
+ #include "Stream.h"
+ #include "AdaptiveByteStream.h"
+ #include "codechandler/TTMLCodecHandler.h"
+@@ -32,6 +30,7 @@ bool CSubtitleSampleReader::Initialize(SESSION::CStream* stream)
+ 
+   std::string codecInternalName = stream->m_info.GetCodecInternalName();
+   const CRepresentation* repr = stream->m_adStream.getRepresentation();
++  const adaptive::AdaptiveTree& tree = stream->m_adStream.GetTree();
+ 
+   if (repr->IsSubtitleFileStream())
+   {
+@@ -40,14 +39,14 @@ bool CSubtitleSampleReader::Initialize(SESSION::CStream* stream)
+       m_codecHandler = std::make_unique<WebVTTCodecHandler>(nullptr, true);
+     else if (STRING::Contains(codecInternalName, CODEC::FOURCC_TTML) ||
+              STRING::Contains(codecInternalName, CODEC::FOURCC_STPP))
+-      m_codecHandler = std::make_unique<TTMLCodecHandler>(nullptr, true);
++      m_codecHandler = std::make_unique<TTMLCodecHandler>(nullptr, true, tree.IsTTMLTimeRelative());
+     else
+     {
+       LOG::LogF(LOGERROR, "Codec \"%s\" not implemented", codecInternalName.data());
+       return false;
+     }
+ 
+-    return InitializeFile(repr->GetBaseUrl());
++    return InitializeFile(repr->GetBaseUrl(), tree);
+   }
+   else
+   {
+@@ -60,7 +59,8 @@ bool CSubtitleSampleReader::Initialize(SESSION::CStream* stream)
+     else if (STRING::Contains(codecInternalName, CODEC::FOURCC_TTML) ||
+              STRING::Contains(codecInternalName, CODEC::FOURCC_DFXP) ||
+              STRING::Contains(codecInternalName, CODEC::FOURCC_STPP))
+-      m_codecHandler = std::make_unique<TTMLCodecHandler>(nullptr, false);
++      m_codecHandler =
++          std::make_unique<TTMLCodecHandler>(nullptr, false, tree.IsTTMLTimeRelative());
+     else
+     {
+       LOG::LogF(LOGERROR, "Codec \"%s\" not implemented", codecInternalName.data());
+@@ -70,15 +70,15 @@ bool CSubtitleSampleReader::Initialize(SESSION::CStream* stream)
+   }
+ }
+ 
+-bool CSubtitleSampleReader::InitializeFile(std::string url)
++bool CSubtitleSampleReader::InitializeFile(std::string url, const adaptive::AdaptiveTree& tree)
+ {
+-  auto kodiProps = CSrvBroker::GetKodiProps();
++  const auto& kodiProps = tree.GetKodiProps();
+ 
+   // Append stream parameters
+   URL::AppendParameters(url, kodiProps.GetStreamParams());
+ 
+   // Download the file
+-  CURL::CUrl curl(url);
++  CURL::CUrl curl(url, kodiProps, tree.GetResources());
+   curl.AddHeaders(kodiProps.GetStreamHeaders());
+   int statusCode = curl.Open();
+   if (statusCode == -1)
+diff --git a/src/samplereader/SubtitleSampleReader.h b/src/samplereader/SubtitleSampleReader.h
+index 70ad0aa31e..d7d1d22d02 100644
+--- a/src/samplereader/SubtitleSampleReader.h
++++ b/src/samplereader/SubtitleSampleReader.h
+@@ -22,6 +22,7 @@ class CStream;
+ namespace adaptive
+ {
+ class AdaptiveStream;
++class AdaptiveTree;
+ }
+ 
+ class ATTR_DLL_LOCAL CSubtitleSampleReader : public ISampleReader
+@@ -51,7 +52,7 @@ public:
+   bool IsEncrypted() const override { return false; }
+ 
+ private:
+-  bool InitializeFile(std::string url);
++  bool InitializeFile(std::string url, const adaptive::AdaptiveTree& tree);
+ 
+   uint64_t m_pts{0};
+   bool m_eos{false};
+diff --git a/src/test/TestDASHTree.cpp b/src/test/TestDASHTree.cpp
+index b9a5f7930c..5ee2a65099 100644
+--- a/src/test/TestDASHTree.cpp
++++ b/src/test/TestDASHTree.cpp
+@@ -7,6 +7,7 @@
+  */
+ 
+ #include "../CompKodiProps.h"
++#include "../CompResources.h"
+ #include "../SrvBroker.h"
+ #include "../decrypters/Helpers.h"
+ #include "../utils/Base64Utils.h"
+@@ -54,7 +55,7 @@ protected:
+   {
+     testHelper::testFile = filePath;
+ 
+-    CSrvBroker::GetInstance()->InitStage1(m_kodiProps);
++    m_compKodiProps = std::make_unique<ADP::KODI_PROPS::CCompKodiProps>(m_kodiProps);
+ 
+     // Download the manifest
+     UTILS::CURL::HTTPResponse resp;
+@@ -69,7 +70,7 @@ protected:
+     // We set the download speed to calculate the initial network bandwidth
+     m_reprChooser->SetDownloadSpeed(500000);
+ 
+-    tree->Configure(m_reprChooser, manifestUpdParams);
++    tree->Configure(m_reprChooser, *m_compKodiProps, m_resources, manifestUpdParams);
+ 
+     // Parse the manifest
+     if (!tree->Open(resp.effectiveUrl, resp.headers, resp.data))
+@@ -87,6 +88,8 @@ protected:
+   }
+ 
+   DASHTestTree* tree;
++  std::unique_ptr<ADP::KODI_PROPS::CCompKodiProps> m_compKodiProps;
++  ADP::RESOURCES::CCompResources m_resources;
+   CHOOSER::IRepresentationChooser* m_reprChooser{nullptr};
+   std::map<std::string, std::string> m_kodiProps;
+ };
+diff --git a/src/test/TestHLSTree.cpp b/src/test/TestHLSTree.cpp
+index f848ca98d8..37bbce233e 100644
+--- a/src/test/TestHLSTree.cpp
++++ b/src/test/TestHLSTree.cpp
+@@ -9,6 +9,7 @@
+ #include "TestHelper.h"
+ #include "../decrypters/Helpers.h"
+ #include "../CompKodiProps.h"
++#include "../CompResources.h"
+ #include "../SrvBroker.h"
+ 
+ #include <gtest/gtest.h>
+@@ -50,7 +51,7 @@ protected:
+   {
+     testHelper::testFile = filePath;
+ 
+-    CSrvBroker::GetInstance()->InitStage1(m_kodiProps);
++    m_compKodiProps = std::make_unique<ADP::KODI_PROPS::CCompKodiProps>(m_kodiProps);
+ 
+     // Download the manifest
+     UTILS::CURL::HTTPResponse resp;
+@@ -65,7 +66,7 @@ protected:
+     // We set the download speed to calculate the initial network bandwidth
+     m_reprChooser->SetDownloadSpeed(500000);
+ 
+-    tree->Configure(m_reprChooser, "");
++    tree->Configure(m_reprChooser, *m_compKodiProps, m_resources, "");
+ 
+     // Parse the manifest
+     if (!tree->Open(resp.effectiveUrl, resp.headers, resp.data))
+@@ -102,6 +103,8 @@ protected:
+   }
+ 
+   adaptive::CHLSTree* tree;
++  std::unique_ptr<ADP::KODI_PROPS::CCompKodiProps> m_compKodiProps;
++  ADP::RESOURCES::CCompResources m_resources;
+   CHOOSER::IRepresentationChooser* m_reprChooser{nullptr};
+   std::map<std::string, std::string> m_kodiProps;
+ };
+diff --git a/src/test/TestSmoothTree.cpp b/src/test/TestSmoothTree.cpp
+index b428d80888..88e1e8a75e 100644
+--- a/src/test/TestSmoothTree.cpp
++++ b/src/test/TestSmoothTree.cpp
+@@ -7,6 +7,7 @@
+  */
+ 
+ #include "../CompKodiProps.h"
++#include "../CompResources.h"
+ #include "../SrvBroker.h"
+ #include "../decrypters/Helpers.h"
+ #include "../utils/UrlUtils.h"
+@@ -45,7 +46,8 @@ protected:
+   {
+     testHelper::testFile = filePath;
+ 
+-    CSrvBroker::GetInstance()->InitStage1({});
++    m_compKodiProps = std::make_unique<ADP::KODI_PROPS::CCompKodiProps>(
++        std::map<std::string, std::string>{});
+ 
+     // Download the manifest
+     UTILS::CURL::HTTPResponse resp;
+@@ -60,7 +62,7 @@ protected:
+     // We set the download speed to calculate the initial network bandwidth
+     m_reprChooser->SetDownloadSpeed(500000);
+ 
+-    tree->Configure(m_reprChooser, "");
++    tree->Configure(m_reprChooser, *m_compKodiProps, m_resources, "");
+ 
+     // Parse the manifest
+     if (!tree->Open(resp.effectiveUrl, resp.headers, resp.data))
+@@ -72,6 +74,8 @@ protected:
+   }
+ 
+   SmoothTestTree* tree;
++  std::unique_ptr<ADP::KODI_PROPS::CCompKodiProps> m_compKodiProps;
++  ADP::RESOURCES::CCompResources m_resources;
+   CHOOSER::IRepresentationChooser* m_reprChooser{nullptr};
+ };
+ 
+diff --git a/src/utils/CurlUtils.cpp b/src/utils/CurlUtils.cpp
+index abece2f27d..ed3229944c 100644
+--- a/src/utils/CurlUtils.cpp
++++ b/src/utils/CurlUtils.cpp
+@@ -16,7 +16,6 @@
+ 
+ #include "CompResources.h"
+ #include "CompKodiProps.h"
+-#include "SrvBroker.h"
+ 
+ using namespace UTILS;
+ using namespace UTILS::CURL;
+@@ -106,9 +105,8 @@ std::unordered_set<Cookie> ParseCookies(const std::string& url,
+   return cookieList;
+ }
+ 
+-std::string GetCookies(const std::string& url)
++std::string GetCookies(const std::string& url, ADP::RESOURCES::CCompResources& srvResources)
+ {
+-  auto& srvResources = CSrvBroker::GetResources();
+   std::lock_guard<std::mutex> lock(srvResources.GetCookiesMutex());
+ 
+   // Get hostname (www.example.com)
+@@ -155,9 +153,10 @@ std::string GetCookies(const std::string& url)
+   return cookiesStr;
+ }
+ 
+-void StoreCookies(const std::string& url, const std::vector<std::string>& cookiesStr)
++void StoreCookies(const std::string& url,
++                  const std::vector<std::string>& cookiesStr,
++                  ADP::RESOURCES::CCompResources& srvResources)
+ {
+-  auto& srvResources = CSrvBroker::GetResources();
+   std::lock_guard<std::mutex> lock(srvResources.GetCookiesMutex());
+   std::unordered_set<Cookie>& cookies = srvResources.Cookies();
+ 
+@@ -185,12 +184,14 @@ void StoreCookies(const std::string& url, const std::vector<std::string>& cookie
+ }
+ } // unnamed namespace
+ 
+-UTILS::CURL::CUrl::CUrl(const std::string& url, const RequestType reqType /* = RequestType::AUTO */)
++UTILS::CURL::CUrl::CUrl(const std::string& url,
++                        const ADP::KODI_PROPS::CCompKodiProps& kodiProps,
++                        ADP::RESOURCES::CCompResources& resources,
++                        const RequestType reqType /* = RequestType::AUTO */)
++  : m_kodiProps(kodiProps), m_resources(resources)
+ {
+   if (m_file.CURLCreate(url))
+   {
+-    auto& kodiProps = CSrvBroker::GetKodiProps();
+-
+     if (reqType == RequestType::HEAD)
+       m_file.CURLAddOption(ADDON_CURL_OPTION_PROTOCOL, "customrequest", "HEAD");
+ 
+@@ -210,11 +211,15 @@ UTILS::CURL::CUrl::CUrl(const std::string& url, const RequestType reqType /* = R
+     // NOTE: if kodi property inputstream.adaptive.stream_headers is set with "cookie" header
+     // the cookies set by the property will replace these
+     if (kodiProps.GetConfig().internalCookies)
+-      m_file.CURLAddOption(ADDON_CURL_OPTION_PROTOCOL, "cookie", GetCookies(url));
++      m_file.CURLAddOption(ADDON_CURL_OPTION_PROTOCOL, "cookie", GetCookies(url, m_resources));
+   }
+ }
+ 
+-UTILS::CURL::CUrl::CUrl(const std::string& url, const std::string& postData) : CUrl::CUrl(url)
++UTILS::CURL::CUrl::CUrl(const std::string& url,
++                        const ADP::KODI_PROPS::CCompKodiProps& kodiProps,
++                        ADP::RESOURCES::CCompResources& resources,
++                        const std::string& postData)
++  : CUrl::CUrl(url, kodiProps, resources)
+ {
+   if (m_file.IsOpen() && !postData.empty())
+   {
+@@ -224,8 +229,8 @@ UTILS::CURL::CUrl::CUrl(const std::string& url, const std::string& postData) : C
+ 
+ UTILS::CURL::CUrl::~CUrl()
+ {
+-  if (CSrvBroker::GetKodiProps().GetConfig().internalCookies)
+-    StoreCookies(GetEffectiveUrl(), GetResponseHeaders("set-cookie"));
++  if (m_kodiProps.GetConfig().internalCookies)
++    StoreCookies(GetEffectiveUrl(), GetResponseHeaders("set-cookie"), m_resources);
+ 
+   m_file.Close();
+ }
+@@ -326,6 +331,8 @@ bool UTILS::CURL::CUrl::IsEOF()
+ }
+ 
+ bool UTILS::CURL::DownloadFile(const std::string& url,
++                               const ADP::KODI_PROPS::CCompKodiProps& kodiProps,
++                               ADP::RESOURCES::CCompResources& resources,
+                                const std::map<std::string, std::string>& reqHeaders,
+                                const std::vector<std::string>& respHeaders,
+                                HTTPResponse& resp)
+@@ -337,7 +344,7 @@ bool UTILS::CURL::DownloadFile(const std::string& url,
+ 
+   while (retries-- > 0)
+   {
+-    CURL::CUrl curl{url};
++    CURL::CUrl curl{url, kodiProps, resources};
+     curl.AddHeaders(reqHeaders);
+ 
+     int statusCode = curl.Open();
+diff --git a/src/utils/CurlUtils.h b/src/utils/CurlUtils.h
+index 8d5c8257a0..478cfcbcdf 100644
+--- a/src/utils/CurlUtils.h
++++ b/src/utils/CurlUtils.h
+@@ -20,6 +20,18 @@
+ #include <string>
+ #include <string_view>
+ 
++namespace ADP
++{
++namespace KODI_PROPS
++{
++class CCompKodiProps;
++}
++namespace RESOURCES
++{
++class CCompResources;
++}
++} // namespace ADP
++
+ namespace UTILS
+ {
+ namespace CURL
+@@ -46,15 +58,25 @@ public:
+  /*!
+   * \brief Create CUrl.
+   * \param url The url of the file to download
++  * \param kodiProps The Kodi properties of the session
++  * \param resources The resources of the session
+   */
+-  CUrl(const std::string& url, const RequestType reqType = RequestType::AUTO);
++  CUrl(const std::string& url,
++       const ADP::KODI_PROPS::CCompKodiProps& kodiProps,
++       ADP::RESOURCES::CCompResources& resources,
++       const RequestType reqType = RequestType::AUTO);
+ 
+  /*!
+   * \brief Create CUrl for POST request, if the data are empty, GET will be performed.
+   * \param url The request url
++  * \param kodiProps The Kodi properties of the session
++  * \param resources The resources of the session
+   * \param postData The data for the POST request
+   */
+-  CUrl(const std::string& url, const std::string& postData);
++  CUrl(const std::string& url,
++       const ADP::KODI_PROPS::CCompKodiProps& kodiProps,
++       ADP::RESOURCES::CCompResources& resources,
++       const std::string& postData);
+   ~CUrl();
+ 
+  /*!
+@@ -121,6 +143,8 @@ public:
+ private:
+   kodi::vfs::CFile m_file;
+   size_t m_bytesRead{0};
++  const ADP::KODI_PROPS::CCompKodiProps& m_kodiProps;
++  ADP::RESOURCES::CCompResources& m_resources;
+ };
+ 
+ struct HTTPResponse
+@@ -149,6 +173,8 @@ struct Cookie
+ /*!
+   * \brief Helper method to download a file.
+   * \param url Url of the file to download
++  * \param kodiProps The Kodi properties of the session
++  * \param resources The resources of the session
+   * \param reqHeaders Headers to use for the HTTP request
+   * \param respHeaders Headers to get from the HTTP response,
+   *                    by default content-type header is always retrieved.
+@@ -156,6 +182,8 @@ struct Cookie
+   * \return True if has success, otherwise false
+   */
+ bool DownloadFile(const std::string& url,
++                  const ADP::KODI_PROPS::CCompKodiProps& kodiProps,
++                  ADP::RESOURCES::CCompResources& resources,
+                   const std::map<std::string, std::string>& reqHeaders,
+                   const std::vector<std::string>& respHeaders,
+                   HTTPResponse& resp);

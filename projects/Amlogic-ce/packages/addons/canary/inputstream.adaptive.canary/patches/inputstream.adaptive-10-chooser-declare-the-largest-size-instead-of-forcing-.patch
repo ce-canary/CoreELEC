@@ -1,0 +1,377 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 10 Nov 2026 08:51:21 -0600
+Subject: [PATCH 10/10] [Chooser] Declare the largest size instead of forcing
+ it at start
+
+With "adjust refresh rate" on and the GUI below the largest allowed
+resolution, the first segment was forced to the top representation.
+That let Kodi switch the display mode for it, but on a slow link the
+segment took longer to load than it played, and playback stalled.
+---
+ src/Session.cpp               | 13 +++++--
+ src/Session.h                 |  4 ++-
+ src/common/Chooser.cpp        |  8 +++--
+ src/common/Chooser.h          | 25 +++++++++++++-
+ src/common/ChooserDefault.cpp | 64 +++++++++++++++++++++++------------
+ src/common/ChooserDefault.h   |  7 ++++
+ src/common/ChooserTest.cpp    | 13 +++++++
+ src/common/ChooserTest.h      |  3 ++
+ src/main.cpp                  |  3 +-
+ src/test/TestDASHTree.cpp     | 25 ++++++++++++++
+ 10 files changed, 136 insertions(+), 29 deletions(-)
+
+diff --git a/src/Session.cpp b/src/Session.cpp
+index a17c0f03e2..4bf9a926bb 100644
+--- a/src/Session.cpp
++++ b/src/Session.cpp
+@@ -117,10 +117,11 @@ void SESSION::CSession::DeleteStreams()
+ 
+ SResult SESSION::CSession::Initialize(std::string manifestUrl,
+                                      const ADP::RESOURCES::ScreenInfo& screenInfo,
+-                                     bool isPrefetch)
++                                     bool isPrefetch,
++                                     bool isMaxSizeDeclared)
+ {
+-  m_reprChooser =
+-      CHOOSER::CreateRepresentationChooser(m_kodiProps.GetChooserProps(), screenInfo);
++  m_reprChooser = CHOOSER::CreateRepresentationChooser(m_kodiProps.GetChooserProps(), screenInfo,
++                                                       isMaxSizeDeclared);
+ 
+   if (isPrefetch && m_reprChooser->IsInteractive())
+     return SResult::Error("The prefetch is not supported with the ask quality stream selection");
+@@ -539,6 +540,12 @@ void SESSION::CSession::UpdateStream(CStream& stream)
+       stream.m_info.SetAspect(static_cast<float>(stream.m_info.GetWidth()) /
+                               stream.m_info.GetHeight());
+ 
++    // the display mode follows the largest size the stream can switch to, not the current one
++    const CRepresentation* maxRep{
++        m_reprChooser->GetMaxRepresentation(stream.m_adStream.getAdaptationSet(), rep)};
++    stream.m_info.SetMaxWidth(static_cast<uint32_t>(maxRep->GetWidth()));
++    stream.m_info.SetMaxHeight(static_cast<uint32_t>(maxRep->GetHeight()));
++
+     stream.m_info.SetFpsRate(rep->GetFrameRate());
+     stream.m_info.SetFpsScale(rep->GetFrameRateScale());
+ 
+diff --git a/src/Session.h b/src/Session.h
+index f59933d93e..09e6b7b0bc 100644
+--- a/src/Session.h
++++ b/src/Session.h
+@@ -41,11 +41,13 @@ public:
+    *  \param manifestUrl The manifest URL
+    *  \param screenInfo The screen info
+    *  \param isPrefetch Fail instead of showing any dialog
++   *  \param isMaxSizeDeclared Kodi takes the max size of a stream from its info
+    *  \return True if has success, false otherwise
+    */
+   SResult Initialize(std::string manifestUrl,
+                      const ADP::RESOURCES::ScreenInfo& screenInfo,
+-                     bool isPrefetch);
++                     bool isPrefetch,
++                     bool isMaxSizeDeclared);
+ 
+   bool CheckPlayableStreams(PLAYLIST::CPeriod* period);
+ 
+diff --git a/src/common/Chooser.cpp b/src/common/Chooser.cpp
+index c24cf8513b..f0a7989427 100644
+--- a/src/common/Chooser.cpp
++++ b/src/common/Chooser.cpp
+@@ -48,7 +48,9 @@ IRepresentationChooser* GetReprChooser(std::string_view type)
+ } // unnamed namespace
+ 
+ IRepresentationChooser* CHOOSER::CreateRepresentationChooser(
+-    const KODI_PROPS::ChooserProps& props, const RESOURCES::ScreenInfo& screenInfo)
++    const KODI_PROPS::ChooserProps& props,
++    const RESOURCES::ScreenInfo& screenInfo,
++    bool isMaxSizeDeclared)
+ {
+   IRepresentationChooser* reprChooser{nullptr};
+ 
+@@ -67,6 +69,7 @@ IRepresentationChooser* CHOOSER::CreateRepresentationChooser(
+   if (!reprChooser)
+     reprChooser = new CRepresentationChooserDefault();
+ 
++  reprChooser->SetMaxSizeDeclared(isMaxSizeDeclared);
+   reprChooser->OnUpdateScreenRes(screenInfo);
+   reprChooser->Initialize(props);
+ 
+@@ -91,11 +94,12 @@ void CHOOSER::IRepresentationChooser::OnUpdateScreenRes(const ADP::RESOURCES::Sc
+   // For example we can have the GUI at 1080p and when playback starts can be
+   // auto-switched to 4k, but to allow Kodi do this we have to provide the
+   // stream resolution that match the max allowed screen resolution.
++  // A Kodi that takes the max size from the stream info needs no forced start.
+   if (m_isAdjustRefreshRate && sInfo.width < sInfo.maxWidth && sInfo.height < sInfo.maxHeight)
+   {
+     m_screenCurrentWidth = sInfo.maxWidth;
+     m_screenCurrentHeight = sInfo.maxHeight;
+-    m_isForceStartsMaxRes = true;
++    m_isForceStartsMaxRes = !m_isMaxSizeDeclared;
+   }
+   else
+   {
+diff --git a/src/common/Chooser.h b/src/common/Chooser.h
+index 0411022105..b31d202f6f 100644
+--- a/src/common/Chooser.h
++++ b/src/common/Chooser.h
+@@ -68,6 +68,13 @@ public:
+    */
+   void OnUpdateScreenRes(const ADP::RESOURCES::ScreenInfo& sInfo);
+ 
++  /*!
++   * \brief Set if Kodi takes the max size of a stream to choose the display mode.
++   *        To be called before the first screen resolution update.
++   * \param isMaxSizeDeclared True if the stream info carries the max size
++   */
++  void SetMaxSizeDeclared(bool isMaxSizeDeclared) { m_isMaxSizeDeclared = isMaxSizeDeclared; }
++
+   /*!
+    * \brief Set the current download speed.
+    *        To be called at each segment download.
+@@ -130,6 +137,20 @@ public:
+       PLAYLIST::CAdaptationSet* adp,
+       PLAYLIST::CRepresentation* currentRep) = 0;
+ 
++  /*!
++   * \brief Get the representation a stream would reach on a link faster than any
++   *        representation, with the current screen and limits
++   * \param adp The adaptation set of the stream
++   * \param currentRep The current representation of the stream
++   * \return The representation, by default the current one, for the choosers
++   *         that never change it while playing
++   */
++  virtual PLAYLIST::CRepresentation* GetMaxRepresentation(PLAYLIST::CAdaptationSet* adp,
++                                                          PLAYLIST::CRepresentation* currentRep)
++  {
++    return currentRep;
++  }
++
+   /*!
+    * \brief Prints details of the specified representation in the log
+    */
+@@ -155,9 +176,11 @@ protected:
+ 
+ private:
+   bool m_isAdjustRefreshRate{false};
++  bool m_isMaxSizeDeclared{false};
+ };
+ 
+ IRepresentationChooser* CreateRepresentationChooser(const ADP::KODI_PROPS::ChooserProps& props,
+-                                                    const ADP::RESOURCES::ScreenInfo& screenInfo);
++                                                    const ADP::RESOURCES::ScreenInfo& screenInfo,
++                                                    bool isMaxSizeDeclared);
+ 
+ } // namespace CHOOSER
+diff --git a/src/common/ChooserDefault.cpp b/src/common/ChooserDefault.cpp
+index 60e89e347d..d44afe91da 100644
+--- a/src/common/ChooserDefault.cpp
++++ b/src/common/ChooserDefault.cpp
+@@ -18,6 +18,7 @@
+ 
+ #include <algorithm>
+ #include <cmath>
++#include <limits>
+ #include <numeric>
+ #include <string_view>
+ 
+@@ -29,6 +30,16 @@ namespace
+ 
+ constexpr const long long SCREEN_RES_REFRESH_SECS = 10;
+ 
++uint32_t GetStreamBandwidth(StreamType streamType, uint32_t bandwidth)
++{
++  // From bandwidth take in consideration:
++  // 90% of bandwidth for video - 10 % for other
++  if (streamType == StreamType::VIDEO)
++    return static_cast<uint32_t>(bandwidth * 0.9);
++  else
++    return static_cast<uint32_t>(bandwidth * 0.1);
++}
++
+ } // unnamed namespace
+ 
+ CRepresentationChooserDefault::CRepresentationChooserDefault()
+@@ -192,16 +203,37 @@ PLAYLIST::CRepresentation* CRepresentationChooserDefault::GetNextRepresentation(
+   if (isVideoStreamType && !m_ignoreScreenRes && !m_ignoreScreenResChange)
+     CheckResolution();
+ 
+-  CRepresentationSelector selector(m_screenWidth, m_screenHeight);
+-  uint32_t bandwidth;
++  const uint32_t bandwidth{GetStreamBandwidth(adp->GetStreamType(), m_bandwidthCurrentLimited)};
+ 
+-  // From bandwidth take in consideration:
+-  // 90% of bandwidth for video - 10 % for other
+-  if (isVideoStreamType)
+-    bandwidth = static_cast<uint32_t>(m_bandwidthCurrentLimited * 0.9);
+-  else
+-    bandwidth = static_cast<uint32_t>(m_bandwidthCurrentLimited * 0.1);
++  CRepresentation* nextRep{
++      SelectRepresentation(adp, m_isForceStartsMaxRes ? std::nullopt : std::optional(bandwidth))};
++
++  if (isVideoStreamType && currentRep) // Only video, to avoid fill too much the log
++  {
++    LOG::Log(LOGDEBUG, "[Repr. chooser] Current average bandwidth: %u bit/s (filtered to %u bit/s)",
++             m_bandwidthCurrent, bandwidth);
++    LogDetails(currentRep, nextRep);
++  }
++
++  if (m_isForceStartsMaxRes)
++    m_isForceStartsMaxRes = false;
+ 
++  return nextRep;
++}
++
++PLAYLIST::CRepresentation* CRepresentationChooserDefault::GetMaxRepresentation(
++    PLAYLIST::CAdaptationSet* adp, PLAYLIST::CRepresentation* currentRep)
++{
++  // an unlimited link is still capped by the bandwidth limit, as in SetDownloadSpeed
++  const uint32_t bandwidthLimited{m_bandwidthMax > 0 ? m_bandwidthMax
++                                                     : std::numeric_limits<uint32_t>::max()};
++  return SelectRepresentation(adp, GetStreamBandwidth(adp->GetStreamType(), bandwidthLimited));
++}
++
++PLAYLIST::CRepresentation* CRepresentationChooserDefault::SelectRepresentation(
++    PLAYLIST::CAdaptationSet* adp, std::optional<uint32_t> bandwidth) const
++{
++  CRepresentationSelector selector(m_screenWidth, m_screenHeight);
+   CRepresentation* nextRep{nullptr};
+   int bestScore{-1};
+ 
+@@ -212,12 +244,12 @@ PLAYLIST::CRepresentation* CRepresentationChooserDefault::GetNextRepresentation(
+ 
+     int score{std::abs(rep->GetWidth() * rep->GetHeight() - m_screenWidth * m_screenHeight)};
+ 
+-    if (!m_isForceStartsMaxRes)
++    if (bandwidth)
+     {
+-      if (rep->GetBandwidth() > bandwidth)
++      if (rep->GetBandwidth() > *bandwidth)
+         continue;
+ 
+-      score += static_cast<int>(std::sqrt(bandwidth - rep->GetBandwidth()));
++      score += static_cast<int>(std::sqrt(*bandwidth - rep->GetBandwidth()));
+     }
+ 
+     if (bestScore == -1 || score < bestScore)
+@@ -230,15 +262,5 @@ PLAYLIST::CRepresentation* CRepresentationChooserDefault::GetNextRepresentation(
+   if (!nextRep)
+     nextRep = selector.Lowest(adp);
+ 
+-  if (isVideoStreamType && currentRep) // Only video, to avoid fill too much the log
+-  {
+-    LOG::Log(LOGDEBUG, "[Repr. chooser] Current average bandwidth: %u bit/s (filtered to %u bit/s)",
+-             m_bandwidthCurrent, bandwidth);
+-    LogDetails(currentRep, nextRep);
+-  }
+-
+-  if (m_isForceStartsMaxRes)
+-    m_isForceStartsMaxRes = false;
+-
+   return nextRep;
+ }
+diff --git a/src/common/ChooserDefault.h b/src/common/ChooserDefault.h
+index ad53f367e6..0af9a6e4af 100644
+--- a/src/common/ChooserDefault.h
++++ b/src/common/ChooserDefault.h
+@@ -36,6 +36,9 @@ public:
+   PLAYLIST::CRepresentation* GetNextRepresentation(PLAYLIST::CAdaptationSet* adp,
+                                                    PLAYLIST::CRepresentation* currentRep) override;
+ 
++  PLAYLIST::CRepresentation* GetMaxRepresentation(PLAYLIST::CAdaptationSet* adp,
++                                                  PLAYLIST::CRepresentation* currentRep) override;
++
+ protected:
+   /*!
+    * \brief Check if screen resolution is changed, if so will refresh values
+@@ -47,6 +50,10 @@ protected:
+    */
+   void RefreshResolution();
+ 
++  // without a bandwidth, the representation nearest to the screen size
++  PLAYLIST::CRepresentation* SelectRepresentation(PLAYLIST::CAdaptationSet* adp,
++                                                  std::optional<uint32_t> bandwidth) const;
++
+   int m_screenWidth{0};
+   int m_screenHeight{0};
+   int m_screenLastWidth{0};
+diff --git a/src/common/ChooserTest.cpp b/src/common/ChooserTest.cpp
+index 0b3d55e375..0724cf950b 100644
+--- a/src/common/ChooserTest.cpp
++++ b/src/common/ChooserTest.cpp
+@@ -115,3 +115,16 @@ PLAYLIST::CRepresentation* CRepresentationChooserTest::GetNextRepresentation(
+ 
+   return nextRep;
+ }
++
++PLAYLIST::CRepresentation* CRepresentationChooserTest::GetMaxRepresentation(
++    PLAYLIST::CAdaptationSet* adp, PLAYLIST::CRepresentation* currentRep)
++{
++  const StreamType streamType{adp->GetStreamType()};
++  if ((streamType != StreamType::VIDEO && streamType != StreamType::AUDIO) ||
++      m_segmentsCountByType[streamType] == 0)
++    return currentRep;
++
++  // the switch test steps up to the representation of the highest bandwidth
++  CRepresentationSelector selector(m_screenCurrentWidth, m_screenCurrentHeight);
++  return selector.HighestBw(adp);
++}
+diff --git a/src/common/ChooserTest.h b/src/common/ChooserTest.h
+index be47d0a033..d84194115a 100644
+--- a/src/common/ChooserTest.h
++++ b/src/common/ChooserTest.h
+@@ -33,6 +33,9 @@ namespace CHOOSER
+     PLAYLIST::CRepresentation* GetNextRepresentation(
+         PLAYLIST::CAdaptationSet* adp, PLAYLIST::CRepresentation* currentRep) override;
+ 
++    PLAYLIST::CRepresentation* GetMaxRepresentation(
++        PLAYLIST::CAdaptationSet* adp, PLAYLIST::CRepresentation* currentRep) override;
++
+   protected:
+     enum class TestMode
+     {
+diff --git a/src/main.cpp b/src/main.cpp
+index ef759b5d4e..388faf6b52 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -48,7 +48,8 @@ bool CInputStreamAdaptive::Open(const kodi::addon::InputstreamProperty& props)
+   m_session = std::make_shared<CSession>(props.GetProperties());
+   m_isPrefetchOpen = props.IsPrefetch();
+ 
+-  SResult ret = m_session->Initialize(props.GetURL(), m_screenInfo, props.IsPrefetch());
++  SResult ret = m_session->Initialize(props.GetURL(), m_screenInfo, props.IsPrefetch(),
++                                      IsInstanceAPIVersionAtLeast(3, 5, 0));
+   if (ret.IsFailed())
+   {
+     if (props.IsPrefetch())
+diff --git a/src/test/TestDASHTree.cpp b/src/test/TestDASHTree.cpp
+index b2625b0061..99dbb3e5f5 100644
+--- a/src/test/TestDASHTree.cpp
++++ b/src/test/TestDASHTree.cpp
+@@ -846,3 +846,28 @@ TEST_F(DASHTreeTest, SkipTrickModeAdaptationSet)
+   EXPECT_EQ(adpSets[0]->GetRepresentations()[0]->GetId(), "2");
+   EXPECT_EQ(adpSets[1]->GetId(), "3");
+ }
++
++TEST_F(DASHTreeTest, ChooserMaxRepresentationIgnoresBandwidth)
++{
++  auto adpSet = PLAYLIST::CAdaptationSet::MakeUniquePtr();
++  adpSet->SetStreamType(PLAYLIST::StreamType::VIDEO);
++
++  const std::vector<std::tuple<int, int, uint32_t>> reprs{
++      {640, 360, 1000000}, {1280, 720, 3000000}, {1920, 1080, 6000000}, {3840, 2160, 16000000}};
++  for (const auto& [width, height, bandwidth] : reprs)
++  {
++    auto repr = PLAYLIST::CRepresentation::MakeUniquePtr(adpSet.get());
++    repr->SetResWidth(width);
++    repr->SetResHeight(height);
++    repr->SetBandwidth(bandwidth);
++    adpSet->AddRepresentation(repr);
++  }
++
++  m_reprChooser->OnUpdateScreenRes({1920, 1080, 3840, 2160});
++  m_reprChooser->PostInit();
++  m_reprChooser->SetDownloadSpeed(250000);
++
++  PLAYLIST::CRepresentation* repr = m_reprChooser->GetRepresentation(adpSet.get());
++  EXPECT_EQ(repr->GetHeight(), 360);
++  EXPECT_EQ(m_reprChooser->GetMaxRepresentation(adpSet.get(), repr)->GetHeight(), 1080);
++}

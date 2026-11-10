@@ -1,0 +1,123 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 9 Nov 2026 21:57:19 -0600
+Subject: [PATCH 04/10] [cdm] Share the CDM module between adapters
+
+Each adapter loaded the CDM library, initialized the module and
+deinitialized it again on unload. The module functions are process-wide,
+so closing one session deinitialized the module under another live one.
+---
+ lib/cdm/cdm/media/cdm/cdm_adapter.cc | 68 ++++++++++++++++++++++++----
+ 1 file changed, 59 insertions(+), 9 deletions(-)
+
+diff --git a/lib/cdm/cdm/media/cdm/cdm_adapter.cc b/lib/cdm/cdm/media/cdm/cdm_adapter.cc
+index 57101c2533..5f375cf9f3 100644
+--- a/lib/cdm/cdm/media/cdm/cdm_adapter.cc
++++ b/lib/cdm/cdm/media/cdm/cdm_adapter.cc
+@@ -13,6 +13,7 @@
+ 
+ #include <chrono>
+ #include <cstring>
++#include <map>
+ #include <thread>
+ 
+ #include <sys/stat.h>
+@@ -63,6 +64,60 @@ const char PATH_SEPARATOR = '/';
+ 
+ constexpr std::chrono::seconds INIT_FUTURE_TIMEOUT_SEC{3};
+ 
++// The CDM module functions are process-wide, so the library is shared by all adapters
++// and the module is initialized once, until the last adapter releases it
++struct CdmModule
++{
++  base::NativeLibrary library{nullptr};
++  int ref_count{0};
++  bool is_initialized{false};
++};
++
++std::mutex cdm_modules_mutex;
++std::map<std::string, CdmModule> cdm_modules;
++
++base::NativeLibrary AcquireCdmModule(const std::string& cdm_path,
++                                     base::NativeLibraryLoadError* error)
++{
++  std::lock_guard<std::mutex> lock(cdm_modules_mutex);
++  CdmModule& module = cdm_modules[cdm_path];
++  if (!module.library)
++  {
++    module.library = base::LoadNativeLibrary(cdm_path, error);
++    if (!module.library)
++    {
++      cdm_modules.erase(cdm_path);
++      return nullptr;
++    }
++  }
++  module.ref_count++;
++  return module.library;
++}
++
++void InitializeCdmModule(const std::string& cdm_path, void (*init_func)())
++{
++  std::lock_guard<std::mutex> lock(cdm_modules_mutex);
++  auto it = cdm_modules.find(cdm_path);
++  if (it != cdm_modules.end() && !it->second.is_initialized)
++  {
++    init_func();
++    it->second.is_initialized = true;
++  }
++}
++
++void ReleaseCdmModule(const std::string& cdm_path, void (*deinit_func)())
++{
++  std::lock_guard<std::mutex> lock(cdm_modules_mutex);
++  auto it = cdm_modules.find(cdm_path);
++  if (it == cdm_modules.end() || --it->second.ref_count > 0)
++    return;
++
++  if (it->second.is_initialized && deinit_func)
++    deinit_func();
++  base::UnloadNativeLibrary(it->second.library);
++  cdm_modules.erase(it);
++}
++
+ void* GetCdmHost(int host_interface_version, void* user_data)
+ {
+   if (!user_data)
+@@ -191,7 +246,7 @@ bool CdmAdapter::LoadCDM()
+   UnloadCDM();
+ 
+   base::NativeLibraryLoadError error;
+-  library_ = base::LoadNativeLibrary(cdm_path_, &error);
++  library_ = AcquireCdmModule(cdm_path_, &error);
+ 
+   if (!library_)
+   {
+@@ -232,7 +287,7 @@ bool CdmAdapter::Initialize()
+   base::LoadNativeLibrary("dxva2.dll", &error);
+ #endif  // defined(OS_WIN)
+ 
+-  init_cdm_func();
++  InitializeCdmModule(cdm_path_, init_cdm_func);
+   
+ #ifndef TARGET_WEBOS
+   cdm12_ = static_cast<cdm::ContentDecryptionModule_12*>(create_cdm_func(
+@@ -321,17 +376,12 @@ void CdmAdapter::UnloadCDM()
+   create_cdm_func = nullptr;
+   get_cdm_verion_func = nullptr;
+ 
+-  if (deinit_cdm_func)
+-  {
+-    deinit_cdm_func();
+-    deinit_cdm_func = nullptr;
+-  }
+-
+   if (library_)
+   {
+-    base::UnloadNativeLibrary(library_);
++    ReleaseCdmModule(cdm_path_, deinit_cdm_func);
+     library_ = nullptr;
+   }
++  deinit_cdm_func = nullptr;
+ }
+ 
+ void CdmAdapter::SendClientMessage(const char* session, uint32_t session_size, CdmAdapterClient::CDMADPMSG msg, const uint8_t *data, size_t data_size, uint32_t status)

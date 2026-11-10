@@ -1,0 +1,23 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 9 Nov 2026 22:00:35 -0600
+Subject: [PATCH 09/10] [addon.xml] Declare the prefetch capability
+
+Kodi opens the next playlist item ahead only through an inputstream
+add-on that declares it can run a second instance beside the playing one.
+---
+ inputstream.adaptive/addon.xml.in | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/inputstream.adaptive/addon.xml.in b/inputstream.adaptive/addon.xml.in
+index 3f488565f5..3d4d537cb4 100644
+--- a/inputstream.adaptive/addon.xml.in
++++ b/inputstream.adaptive/addon.xml.in
+@@ -10,6 +10,7 @@
+     name="adaptive"
+     extension=""
+     tags="true"
++    prefetch="true"
+     listitemprops="drm|drm_legacy|license_type|license_key|license_url|license_url_append|license_data|license_flags|server_certificate|common_headers|manifest_upd_params|manifest_params|manifest_headers|stream_params|stream_headers|original_audio_language|play_timeshift_buffer|pre_init_data|stream_selection_type|chooser_bandwidth_max|chooser_resolution_max|chooser_resolution_secure_max|live_delay|config|manifest_config"
+     library_@PLATFORM@="@LIBRARY_FILENAME@"/>
+   <extension point="xbmc.addon.metadata">
