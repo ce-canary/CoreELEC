@@ -2,11 +2,11 @@
 # Copyright (C) 2024-present Team CoreELEC (https://coreelec.org)
 
 PKG_NAME="common_drivers"
-PKG_VERSION="41bce58b691ec273db3096099ee0b84ea7578181"
+PKG_VERSION="117170f4221745e194918fbeed771bb5f2306dc0"
 PKG_SHA256=""
 PKG_LICENSE="GPL-2.0+ OR MIT"
 PKG_SITE="https://coreelec.org"
-PKG_URL="https://github.com/CoreELEC/common_drivers/archive/${PKG_VERSION}.tar.gz"
+PKG_URL="https://github.com/ce-canary/common_drivers/archive/${PKG_VERSION}.tar.gz"
 PKG_DEPENDS_TARGET=""
 PKG_LONGDESC="${PKG_NAME}: extra drivers for amlogic"
 PKG_TOOLCHAIN="manual"
