@@ -4,11 +4,11 @@
 # Copyright (C) 2022-present Team CoreELEC (https://coreelec.tv)
 
 PKG_NAME="kodi"
-PKG_VERSION="99db2a21a482d79f8cefaf9725823550b728cdbf"
+PKG_VERSION="be446f662b01372671db712cd556f4b738a08b1f"
 PKG_SHA256=""
 PKG_LICENSE="GPL"
 PKG_SITE="http://www.kodi.tv"
-PKG_URL="https://github.com/CoreELEC/xbmc/archive/${PKG_VERSION}.tar.gz"
+PKG_URL="https://github.com/ce-canary/xbmc/archive/${PKG_VERSION}.tar.gz"
 PKG_DEPENDS_TARGET="toolchain JsonSchemaBuilder:host TexturePacker:host Python3 zlib systemd lzo pcre2 swig:host libass curl exiv2 fontconfig fribidi tinyxml tinyxml2 libjpeg-turbo freetype libcdio taglib libxml2 libxslt nlohmann-json sqlite ffmpeg crossguid libfmt lirc libfstrcmp flatbuffers:host flatbuffers libudfread spdlog obu_util libdovi"
 PKG_DEPENDS_UNPACK="commons-lang3 commons-text groovy"
 PKG_DEPENDS_HOST="toolchain"
